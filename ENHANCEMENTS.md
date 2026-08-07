@@ -141,10 +141,20 @@ for each output frame t:
 |---|---|---|
 | Flow | Built-in pyramid block matching (`temporal::estimate`) | **done** — 5–8 ms/pair |
 | Warp | Bilinear warp of previous **output**, scale-aware | **done** — `temporal::warp` |
-| Confidence | Forward–backward consistency + magnitude + scene cut | next |
-| Cuts | Reuse/extend `interpolate::is_scene_cut` | next |
+| Confidence | Match residual × forward–backward consistency (`temporal::analyze`) | **done** — 13–15 ms/pair |
+| Cuts | `interpolate::is_scene_cut`; disables the lock outright | **done** |
+| Blend | `temporal::lock`, confidence-weighted, scale-aware | **done** |
 | State | Last output + last source only (streamable; no full-clip buffer) | next |
 | UI | Enable Stability for real: on/off + lock strength | next |
+
+**Confidence tracks warp quality on real footage** — it independently found
+both failure modes without being told about them:
+
+| pair | residual reduction | confidence |
+|---|---|---|
+| 167→168 (9.8 px motion) | +17% — worst | **0.34** — lowest |
+| 0→1 (brightness change) | +2% — worst | **0.45** |
+| good pairs | +30…+53% | 0.79–0.84 |
 
 **Flow validated on real motion.** `SpaceVoyage_4` (240 frames, 10 pairs
 sampled across the clip): **mean residual reduction +35.3%**, best +58%, at a

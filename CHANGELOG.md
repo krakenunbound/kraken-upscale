@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — Phase 1 step 2: confidence gate
+
+### Trust, then blend
+
+- Added `temporal::analyze`, which estimates motion and decides per grid cell
+  how far it can be trusted, and `temporal::lock`, which blends the warped
+  previous output into current detail in proportion to that trust. Neither is
+  wired into the pipeline yet.
+- Two independent checks, chosen because they fail on different things:
+  - **match residual** catches brightness change, where a fade leaves no good
+    match at any offset;
+  - **forward–backward consistency** catches occlusion and motion boundaries,
+    which residual can miss when a wrong match happens to score well.
+- They are **multiplied, not averaged**. Either failing alone makes the warp
+  untrustworthy, and averaging would let a good residual mask an occlusion.
+- Scene cuts disable the lock outright rather than softening it, so no invented
+  detail is carried across an edit.
+
+### Validated against the previously measured failure modes
+
+The gate found both without being told about them:
+
+| pair | residual reduction | confidence |
+|---|---|---|
+| 167→168 (9.8 px motion) | +17% — worst | **0.34** — lowest |
+| 0→1 (brightness change) | +2% — worst | **0.45** |
+| good pairs | +30…+53% | 0.79–0.84 |
+
+- Cost rises from 5–8 ms to **13–15 ms** per pair, since flow now runs in both
+  directions. Still under 1% of the 1.65 s/frame model budget.
+
 ## Unreleased — Phase 1 step 1: optical flow
 
 ### Temporal lock groundwork
