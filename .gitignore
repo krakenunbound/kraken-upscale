@@ -1,0 +1,21 @@
+/target/
+/.playwright-mcp/
+
+# Downloaded/generated model payloads; keep models/models.json metadata.
+/models/*.onnx
+/models/*.pth
+
+# Redistributable runtime payloads are staged for packaging, not source control.
+/cuda/
+/vendor/cuda/
+/vendor/ffmpeg/bin/
+/vendor/ffmpeg/doc/
+/vendor/ffmpeg/include/
+/vendor/ffmpeg/lib/
+/vendor/ffmpeg/presets/
+
+# Local run/build logs.
+/out.txt
+/err.txt
+/rel-err.txt
+*.pdb

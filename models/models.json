@@ -1,0 +1,92 @@
+[
+  {
+    "name": "4x-AnimeSharp",
+    "file": "4x-AnimeSharp.onnx",
+    "fp16_file": "4x-AnimeSharp.fp16.onnx",
+    "scale": 4,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.0
+  },
+  {
+    "name": "4x-UltraSharp",
+    "file": "4x-UltraSharp.onnx",
+    "fp16_file": "4x-UltraSharp.fp16.onnx",
+    "scale": 4,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.0
+  },
+  {
+    "name": "4x_foolhardy_Remacri",
+    "file": "4x_foolhardy_Remacri.onnx",
+    "fp16_file": "4x_foolhardy_Remacri.fp16.onnx",
+    "scale": 4,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.0
+  },
+  {
+    "name": "4x_NMKD-Siax_200k",
+    "file": "4x_NMKD-Siax_200k.onnx",
+    "fp16_file": "4x_NMKD-Siax_200k.fp16.onnx",
+    "scale": 4,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.0
+  },
+  {
+    "name": "8x_NMKD-Faces_160000_G",
+    "file": "8x_NMKD-Faces_160000_G.onnx",
+    "fp16_file": "8x_NMKD-Faces_160000_G.fp16.onnx",
+    "scale": 8,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.2
+  },
+  {
+    "name": "8x_NMKD-Superscale_150000_G",
+    "file": "8x_NMKD-Superscale_150000_G.onnx",
+    "fp16_file": "8x_NMKD-Superscale_150000_G.fp16.onnx",
+    "scale": 8,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.2
+  },
+  {
+    "name": "ESRGAN_4x",
+    "file": "ESRGAN_4x.onnx",
+    "fp16_file": "ESRGAN_4x.fp16.onnx",
+    "scale": 4,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.0
+  },
+  {
+    "name": "RealESRGAN_x2",
+    "file": "RealESRGAN_x2.onnx",
+    "fp16_file": "RealESRGAN_x2.fp16.onnx",
+    "scale": 2,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.0
+  },
+  {
+    "name": "RealESRGAN_x4",
+    "file": "RealESRGAN_x4.onnx",
+    "fp16_file": "RealESRGAN_x4.fp16.onnx",
+    "scale": 4,
+    "input_channels": 3,
+    "output_channels": 3,
+    "architecture": "ESRGAN",
+    "size_mb": 64.0
+  }
+]

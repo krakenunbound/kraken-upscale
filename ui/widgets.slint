@@ -1,0 +1,688 @@
+import { Pal } from "theme.slint";
+
+// ── Text ────────────────────────────────────────────────────────────────────
+
+// Uppercase, letter-spaced, cyan. The organising element of the whole rail.
+export component SectionLabel inherits Text {
+    color: Pal.label;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.1px;
+}
+
+export component FieldLabel inherits Text {
+    color: Pal.text-dim;
+    font-size: 12px;
+    vertical-alignment: center;
+}
+
+// Word-wrapped text reports its *unwrapped* height to the enclosing layout, so
+// a three-line string only ever reserves one line and whatever follows it gets
+// laid out on top. `lines` states the wrapped height up front.
+export component Help inherits Text {
+    in property <int> lines: 2;
+    color: Pal.text-mute;
+    font-size: 10.5px;
+    wrap: word-wrap;
+    min-height: root.lines * 14px;
+}
+
+export component Mono inherits Text {
+    font-family: Pal.mono;
+    font-size: 11px;
+    color: Pal.text-dim;
+}
+
+// ── Icons ───────────────────────────────────────────────────────────────────
+//
+// Drawn as vector paths rather than font glyphs. Segoe UI has no coverage for
+// most geometric/symbol codepoints and renders them as tofu, and shipping an
+// icon font just for a handful of marks isn't worth it.
+
+export component Chevron inherits Path {
+    in property <color> tint: Pal.text-mute;
+    width: 10px;
+    height: 6px;
+    viewbox-width: 10;
+    viewbox-height: 6;
+    commands: "M 0.9 1 L 5 4.8 L 9.1 1";
+    stroke: root.tint;
+    stroke-width: 1.5px;
+    fill: transparent;
+}
+
+export component PlayGlyph inherits Path {
+    in property <color> tint: Pal.accent;
+    width: 9px;
+    height: 11px;
+    viewbox-width: 9;
+    viewbox-height: 11;
+    commands: "M 0.5 0.5 L 8.5 5.5 L 0.5 10.5 Z";
+    fill: root.tint;
+}
+
+export component SplitGlyph inherits Path {
+    in property <color> tint: Pal.text-mute;
+    width: 22px;
+    height: 11px;
+    viewbox-width: 22;
+    viewbox-height: 11;
+    commands: "M 0.6 0.6 L 21.4 0.6 L 21.4 10.4 L 0.6 10.4 Z M 11 0.6 L 11 10.4";
+    stroke: root.tint;
+    stroke-width: 1.2px;
+    fill: transparent;
+}
+
+export component SearchGlyph inherits Path {
+    in property <color> tint: Pal.text-mute;
+    width: 11px;
+    height: 11px;
+    viewbox-width: 11;
+    viewbox-height: 11;
+    commands: "M 4.4 0.7 A 3.7 3.7 0 1 1 4.39 0.7 Z M 7.2 7.2 L 10.3 10.3";
+    stroke: root.tint;
+    stroke-width: 1.3px;
+    fill: transparent;
+}
+
+export component GearGlyph inherits Path {
+    in property <color> tint: Pal.text-dim;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 14;
+    viewbox-height: 14;
+    commands: "M 7 2.6 A 4.4 4.4 0 1 1 6.99 2.6 Z M 7 5.1 A 1.9 1.9 0 1 1 6.99 5.1 Z";
+    stroke: root.tint;
+    stroke-width: 1.3px;
+    fill: transparent;
+}
+
+// ── Containers ──────────────────────────────────────────────────────────────
+
+export component Card inherits Rectangle {
+    background: Pal.panel;
+    border-width: 1px;
+    border-color: Pal.line-soft;
+    border-radius: Pal.radius;
+}
+
+// Small status pill: dot + label, as in the H3 Studio header.
+export component StatusPill inherits Rectangle {
+    in property <string> text;
+    in property <color> dot: Pal.ok;
+
+    height: 24px;
+    background: Pal.card;
+    border-width: 1px;
+    border-color: Pal.line;
+    border-radius: 12px;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 12px;
+        spacing: 7px;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 4px;
+                background: root.dot;
+            }
+        }
+
+        Text {
+            text: root.text;
+            color: Pal.text-dim;
+            font-size: 10.5px;
+            font-weight: 600;
+            letter-spacing: 0.6px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ── Controls ────────────────────────────────────────────────────────────────
+
+export component Check inherits Rectangle {
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+
+    width: 15px;
+    height: 15px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.checked ? Pal.accent
+                : ta.has-hover && root.enabled ? Pal.line-accent
+                : Pal.line;
+    background: root.checked ? Pal.accent : Pal.input;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    Text {
+        visible: root.checked;
+        text: "✓";
+        color: Pal.text-on-accent;
+        font-size: 11px;
+        font-weight: 800;
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+// Checkbox vertically centred for use as a row in a HorizontalLayout.
+export component CheckRow inherits HorizontalLayout {
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <string> text;
+    in property <string> hint;
+    in property <int> hint-lines: 1;
+    callback toggled(bool);
+
+    spacing: 8px;
+
+    VerticalLayout {
+        alignment: center;
+        Check {
+            checked <=> root.checked;
+            enabled: root.enabled;
+            toggled(v) => { root.toggled(v); }
+        }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 2px;
+        horizontal-stretch: 1;
+
+        FieldLabel {
+            text: root.text;
+            color: root.enabled ? Pal.text-dim : Pal.text-mute;
+        }
+
+        Help {
+            text: root.hint;
+            lines: root.hint-lines;
+            visible: root.hint != "";
+            height: root.hint == "" ? 0px : self.min-height;
+        }
+    }
+}
+
+export component Btn inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 32px;
+    border-radius: Pal.radius;
+    border-width: 1px;
+    border-color: root.primary ? (ta.has-hover ? Pal.accent : Pal.accent-dim)
+                : (ta.has-hover && root.enabled ? Pal.line-accent : Pal.line);
+    background: root.primary
+        ? (ta.pressed ? Pal.accent-dim : ta.has-hover ? #3ae0cf : Pal.accent)
+        : (ta.pressed ? Pal.panel : ta.has-hover ? Pal.raised : Pal.card);
+    opacity: root.enabled ? 1.0 : 0.35;
+
+    Text {
+        text: root.text;
+        color: root.primary ? Pal.text-on-accent : Pal.text;
+        font-size: 12px;
+        font-weight: root.primary ? 700 : 500;
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SegBtn inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 24px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.active ? Pal.accent-dim : transparent;
+    background: root.active ? Pal.accent-deep : (ta.has-hover ? Pal.raised : transparent);
+
+    Text {
+        text: root.text;
+        color: root.active ? Pal.accent : Pal.text-mute;
+        font-size: 11px;
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Dropdown inherits Rectangle {
+    in property <[string]> items;
+    in-out property <int> current: 0;
+    in property <bool> accent: false;
+    in property <bool> enabled: true;
+    callback changed(int);
+
+    height: Pal.row-h;
+    background: Pal.input;
+    border-width: 1px;
+    border-color: ta.has-hover && root.enabled ? Pal.line-accent : Pal.line;
+    border-radius: Pal.radius;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 9px;
+        spacing: 6px;
+
+        // Accent variant renders the value as a filled chip, mirroring the way
+        // the reference UI highlights the live model and scale.
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+
+            Rectangle {
+                height: Pal.row-h - 8px;
+                background: root.accent ? Pal.accent-deep : transparent;
+                border-radius: 3px;
+                border-width: root.accent ? 1px : 0px;
+                border-color: Pal.accent-dim;
+
+                Text {
+                    x: 7px;
+                    width: parent.width - 10px;
+                    height: 100%;
+                    text: root.items[root.current];
+                    color: root.accent ? Pal.accent : Pal.text;
+                    font-size: 12px;
+                    font-weight: root.accent ? 600 : 400;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Chevron { }
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { pop.show(); }
+    }
+
+    pop := PopupWindow {
+        x: 0;
+        y: root.height + 2px;
+        width: root.width;
+        height: root.items.length * 26px + 8px;
+
+        Rectangle {
+            background: Pal.card;
+            border-width: 1px;
+            border-color: Pal.line-accent;
+            border-radius: Pal.radius;
+
+            VerticalLayout {
+                padding: 4px;
+
+                for it[i] in root.items: Rectangle {
+                    height: 26px;
+                    border-radius: 3px;
+                    background: ita.has-hover ? Pal.raised : transparent;
+
+                    Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: 100%;
+                        text: it;
+                        color: i == root.current ? Pal.accent : Pal.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    ita := TouchArea {
+                        clicked => {
+                            root.current = i;
+                            root.changed(i);
+                            pop.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component Slid inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <bool> enabled: true;
+    in-out property <float> value: 1;
+    callback changed(float);
+    callback released();
+
+    height: 18px;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    property <float> frac: (root.maximum - root.minimum) <= 0
+        ? 0
+        : (root.value - root.minimum) / (root.maximum - root.minimum);
+
+    function apply(px: length) {
+        root.value = Math.clamp(
+            root.minimum + (px / root.width) * (root.maximum - root.minimum),
+            root.minimum, root.maximum);
+        root.changed(root.value);
+    }
+
+    Rectangle {
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        width: 100%;
+        border-radius: 2px;
+        background: Pal.track-off;
+    }
+
+    Rectangle {
+        x: 0;
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        width: parent.width * root.frac;
+        border-radius: 2px;
+        background: Pal.track;
+    }
+
+    Rectangle {
+        x: Math.clamp(parent.width * root.frac - 6px, 0px, parent.width - 12px);
+        y: (parent.height - 12px) / 2;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Pal.accent;
+        border-width: 2px;
+        border-color: Pal.bg;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        width: 100%;
+        height: 100%;
+        moved => {
+            if (ta.pressed) { root.apply(ta.mouse-x); }
+        }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down) { root.apply(ta.mouse-x); }
+            if (ev.kind == PointerEventKind.up) { root.released(); }
+        }
+    }
+}
+
+export component NumBox inherits Rectangle {
+    in property <string> text;
+
+    width: 54px;
+    height: 24px;
+    background: Pal.input;
+    border-width: 1px;
+    border-color: Pal.line;
+    border-radius: 3px;
+
+    Text {
+        x: 7px;
+        width: parent.width - 14px;
+        height: 100%;
+        text: root.text;
+        color: Pal.text;
+        font-size: 11.5px;
+        font-family: Pal.mono;
+        vertical-alignment: center;
+    }
+}
+
+// A labelled slider row: label | track | numeric readout.
+export component SliderRow inherits HorizontalLayout {
+    in property <string> text;
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <bool> enabled: true;
+    in-out property <float> value: 1;
+    callback released();
+
+    spacing: 8px;
+
+    VerticalLayout {
+        alignment: center;
+        width: 74px;
+        FieldLabel { text: root.text; }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Slid {
+            minimum: root.minimum;
+            maximum: root.maximum;
+            enabled: root.enabled;
+            value <=> root.value;
+            released => { root.released(); }
+        }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        NumBox { text: "\{Math.round(root.value * 100) / 100}"; }
+    }
+}
+
+// A labelled dropdown row.
+export component FieldRow inherits HorizontalLayout {
+    in property <string> text;
+    in property <[string]> items;
+    in property <bool> accent: false;
+    in property <bool> enabled: true;
+    in-out property <int> current: 0;
+    callback changed(int);
+
+    spacing: 8px;
+
+    VerticalLayout {
+        alignment: center;
+        width: 74px;
+        FieldLabel { text: root.text; }
+    }
+
+    Dropdown {
+        items: root.items;
+        current <=> root.current;
+        accent: root.accent;
+        enabled: root.enabled;
+        horizontal-stretch: 1;
+        changed(i) => { root.changed(i); }
+    }
+}
+
+// ── Section header ──────────────────────────────────────────────────────────
+
+// Checkbox-gated collapsible header: [x] Label ............ [+/-]
+export component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in property <bool> gated: true;
+    in-out property <bool> enabled: false;
+    in-out property <bool> expanded: false;
+    callback toggled(bool);
+
+    height: 36px;
+    background: ta.has-hover ? Pal.card : transparent;
+    border-radius: Pal.radius;
+
+    // Declared first so it sits *under* the row: later siblings paint on top
+    // in Slint, and a trailing TouchArea would swallow every click aimed at
+    // the checkbox.
+    ta := TouchArea {
+        clicked => { root.expanded = !root.expanded; }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 9px;
+
+        VerticalLayout {
+            alignment: center;
+            width: root.gated ? 15px : 0px;
+            Check {
+                visible: root.gated;
+                checked <=> root.enabled;
+                toggled(v) => {
+                    root.toggled(v);
+                    if (v) { root.expanded = true; }
+                }
+            }
+        }
+
+        Text {
+            text: root.title;
+            color: root.enabled ? Pal.text : Pal.text-dim;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            text: root.expanded ? "−" : "+";
+            color: Pal.text-mute;
+            font-size: 15px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ── Dock tab ────────────────────────────────────────────────────────────────
+
+/// Vertical tab for the left dock.
+///
+/// Letters are stacked upright rather than set in rotated text: rotating a
+/// `Text` resamples the glyph atlas and comes out mushy and hard to read at
+/// tab sizes. Stacked capitals render at native crispness and read fine for
+/// short labels.
+export component VTab inherits Rectangle {
+    in property <[string]> letters;
+    in property <bool> active: false;
+    callback clicked();
+
+    width: 24px;
+    height: root.letters.length * 13px + 14px;
+    border-radius: 3px;
+    background: root.active ? Pal.accent-deep
+              : ta.has-hover ? Pal.card
+              : transparent;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 0px;
+
+        for c in root.letters: Text {
+            text: c;
+            height: 13px;
+            color: root.active ? Pal.accent : (ta.has-hover ? Pal.text : Pal.text-dim);
+            font-size: 10.5px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// ── Stat readouts ───────────────────────────────────────────────────────────
+
+/// `label   value` in monospace, as used by the system panel.
+export component StatRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <color> tint: Pal.stat;
+
+    height: 19px;
+    spacing: 8px;
+
+    Text {
+        text: root.label;
+        color: Pal.text-mute;
+        font-size: 10.5px;
+        font-family: Pal.mono;
+        width: 74px;
+        vertical-alignment: center;
+    }
+
+    Text {
+        text: root.value;
+        color: root.tint;
+        font-size: 10.5px;
+        font-family: Pal.mono;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+/// A titled group of stat rows.
+export component StatBox inherits VerticalLayout {
+    in property <string> title;
+
+    spacing: 6px;
+
+    SectionLabel { text: root.title; }
+
+    Rectangle {
+        background: Pal.card;
+        border-width: 1px;
+        border-color: Pal.line-soft;
+        border-radius: Pal.radius;
+        height: body.preferred-height + 16px;
+
+        body := VerticalLayout {
+            x: 10px;
+            y: 8px;
+            width: parent.width - 20px;
+            spacing: 1px;
+            @children
+        }
+    }
+}
+
+export component Rule inherits Rectangle {
+    height: 1px;
+    background: Pal.line-soft;
+}

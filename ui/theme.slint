@@ -1,0 +1,53 @@
+// Palette derived from MiniMax H3 Studio: deep teal-navy base, bright cyan
+// accent, uppercase letter-spaced section labels, monospace technical readouts.
+
+export global Pal {
+    // Surfaces, darkest to lightest.
+    out property <color> bg: #08151d;
+    out property <color> panel: #0c1f29;
+    out property <color> card: #102935;
+    out property <color> raised: #143543;
+    out property <color> input: #0a1c25;
+
+    out property <color> line: #1b3c4a;
+    out property <color> line-soft: #14303c;
+    out property <color> line-accent: #24606e;
+
+    // Cyan family. `accent` is the workhorse; `label` tints section headers.
+    out property <color> accent: #2fd4c4;
+    out property <color> accent-dim: #1c8c85;
+    out property <color> accent-deep: #0f4a4a;
+    out property <color> label: #3fb8cf;
+
+    out property <color> text: #d6e6ec;
+    out property <color> text-dim: #92aeba;
+    out property <color> text-mute: #62808d;
+    out property <color> text-on-accent: #04222a;
+
+    out property <color> ok: #3fd97f;
+    out property <color> warn: #e8b755;
+    out property <color> danger: #f2685f;
+
+    // Secondary accents lifted from the kraken mark's splash: violet marks the
+    // temporal/stability controls, ember flags attention states.
+    // Monospace readout values, as in the H3 Studio stat panels.
+    out property <color> stat: #86e0b0;
+
+    out property <color> violet: #9b6fd4;
+    out property <color> violet-deep: #2e1f4a;
+    out property <color> ember: #f0913a;
+
+    // Warm slider track, lifted straight from H3 Studio. Reads as "mechanical"
+    // against all the cyan and keeps sliders from vanishing into the panels.
+    out property <color> track: #c8bca6;
+    out property <color> track-off: #2a3a42;
+
+    out property <string> font: "Segoe UI";
+    out property <string> mono: "Consolas";
+
+    out property <length> radius: 4px;
+    out property <length> gap: 10px;
+    out property <length> pad: 12px;
+    out property <length> rail-w: 348px;
+    out property <length> row-h: 30px;
+}

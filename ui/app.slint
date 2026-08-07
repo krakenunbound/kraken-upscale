@@ -1,0 +1,1656 @@
+import { Pal } from "theme.slint";
+import {
+    SectionLabel, FieldLabel, Help, Mono, Card, StatusPill, Check, CheckRow,
+    Btn, SegBtn, Dropdown, Slid, NumBox, SliderRow, FieldRow, SectionHeader,
+    Rule, PlayGlyph, SearchGlyph, GearGlyph, SplitGlyph, Chevron,
+    StatRow, StatBox, VTab
+} from "widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct TaskRow {
+    name: string,
+    detail: string,
+    status: string,
+    path: string,
+    progress: float,
+    running: bool,
+    failed: bool,
+    done: bool,
+}
+
+export component MainWindow inherits Window {
+    title: "Kraken Upscale";
+    icon: @image-url("../assets/logo.png");
+    background: Pal.bg;
+    preferred-width: 1560px;
+    preferred-height: 980px;
+    min-width: 1120px;
+    min-height: 680px;
+
+    // ── State surfaced to Rust ──────────────────────────────────────────────
+    in property <bool> has-clip: false;
+    in property <string> clip-name: "";
+    in property <string> clip-specs: "";
+    in property <string> src-badge: "—";
+    in property <string> out-badge: "—";
+    in property <string> gpu-name: "RTX 3090";
+    in property <string> runtime-state: "RUNTIME OK";
+    in property <string> source-note: "";
+    in property <string> preview-status: "";
+    in property <float> preview-progress: 0;
+    in property <string> model-note: "";
+    in-out property <float> strength: 1.0;
+    in-out property <float> detail-limit: 1.0;
+    in-out property <bool> fp16: true;
+    in-out property <bool> auto-tile: true;
+    in property <bool> export-running: false;
+    in property <float> clip-duration: 0;
+    in property <float> clip-fps: 0;
+
+    // Persisted alongside the model/scale/strength above.
+    in-out property <int> content-index: 0;
+    in-out property <int> restore-index: 0;
+    in-out property <bool> detect-fields: false;
+    in-out property <bool> preserve-grain: false;
+    in-out property <bool> stability-on: true;
+    in-out property <float> lock: 0.75;
+    in-out property <float> cut-detect: 0.4;
+    in-out property <bool> interp-on: false;
+    in-out property <int> interp-index: 1;
+    in property <image> frame-before;
+    in property <image> frame-after;
+    in property <image> thumb;
+    in property <[string]> model-names: ["(no models converted)"];
+    in property <[TaskRow]> tasks: [];
+    in property <[string]> log-lines: [];
+    // Left dock: 0 = closed, 1 = logs, 2 = system.
+    in-out property <int> dock-panel: 0;
+    out property <length> dock-current-width: dock.width;
+
+    // Live GPU telemetry, refreshed on a background poll.
+    in property <string> sys-device: "—";
+    in property <int> sys-usage: 0;
+    in property <int> sys-temp: 0;
+    in property <int> sys-clock: 0;
+    in property <int> sys-clock-max: 0;
+    in property <float> sys-power: 0;
+    in property <float> sys-power-max: 0;
+    in property <float> sys-vram-used: 0;
+    in property <float> sys-vram-total: 0;
+    in property <float> sys-vram-free: 0;
+    in property <string> sys-driver: "—";
+
+    in property <string> rt-app: "";
+    in property <string> rt-ort: "";
+    in property <string> rt-onnx: "";
+    in property <string> rt-ffmpeg: "";
+    in property <string> rt-cuda: "";
+    in property <string> rt-cudnn: "";
+    in property <string> rt-provider: "—";
+    in property <string> models-dir: "";
+    in property <int> models-count: 0;
+    in property <string> export-summary: "mp4 · H.264 NVENC · CQ 19 · audio copy";
+    in-out property <int> scale-index: 0;
+    in-out property <int> model-index: 0;
+
+    in-out property <float> split: 0.5;
+    in-out property <int> view-mode: 0;   // 0 = split, 1 = side by side
+    in-out property <float> playhead: 0;
+
+    // Preview transform. zoom 1.0 == fit to pane.
+    in property <float> clip-aspect: 1.0;
+    in-out property <float> zoom: 1.0;
+    in-out property <length> pan-x: 0px;
+    in-out property <length> pan-y: 0px;
+
+    // Section open/closed state lives on the window, not on the headers. The
+    // rail's scroll height is derived from these, and reading them back out of
+    // the ScrollView's own subtree would make the viewport depend on its
+    // content — Slint drops that binding as cyclic and silently falls back to
+    // the visible height, which is exactly what makes sections overlap.
+    property <bool> src-open: true;
+    property <bool> det-open: true;
+    property <bool> stb-open: true;
+    property <bool> fi-open: false;
+    property <bool> col-open: false;
+
+    callback import-clicked();
+    callback seek(float);
+    callback settings-changed();
+    callback reset-view();
+    callback reveal(string);
+    callback add-task();
+    callback export-current();
+    callback batch-export();
+    callback cancel-export();
+
+    // Stacking root: the logo is declared after the layout so it can paint on
+    // top of the header edge and hang down into the content below it.
+    Rectangle {
+
+        VerticalLayout {
+            spacing: 0;
+
+            // ── Branded toolbar ─────────────────────────────────────────────
+            Rectangle {
+                height: 54px;
+                background: Pal.panel;
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Pal.line;
+                }
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 10px;
+
+                    // Reserved space for the overhanging logo.
+                    Rectangle { width: 94px; }
+
+                    VerticalLayout {
+                        alignment: center;
+                        HorizontalLayout {
+                            spacing: 7px;
+                            Text {
+                                text: "KRAKEN";
+                                color: Pal.accent;
+                                font-size: 15px;
+                                font-weight: 800;
+                                letter-spacing: 2.4px;
+                            }
+                            Text {
+                                text: "UPSCALE";
+                                color: Pal.text-dim;
+                                font-size: 15px;
+                                font-weight: 300;
+                                letter-spacing: 2.4px;
+                            }
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    VerticalLayout {
+                        alignment: center;
+                        StatusPill { text: root.gpu-name; dot: Pal.accent; }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        StatusPill { text: root.runtime-state; dot: Pal.ok; }
+                    }
+                }
+            }
+
+            // ── Body ────────────────────────────────────────────────────────
+            HorizontalLayout {
+                spacing: 0;
+                vertical-stretch: 1;
+
+                // ══ Log dock ═════════════════════════════════════════════
+                // Anchored tab on the left margin, PixInsight style: the strip
+                // is always present, the panel slides out from behind it.
+                dock := Rectangle {
+                    width: 30px + (root.dock-panel != 0 ? 380px : 0px);
+                    background: Pal.bg;
+                    clip: true;
+
+                    animate width { duration: 170ms; easing: ease-in-out; }
+
+                    // Always-visible tab strip. Only the tab labels rotate —
+                    // panel content stays horizontal.
+                    Rectangle {
+                        x: 0;
+                        width: 30px;
+                        height: 100%;
+                        background: Pal.panel;
+
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            height: 100%;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 10px;
+                            letters: ["L", "O", "G", "S"];
+                            active: root.dock-panel == 1;
+                            clicked => {
+                                root.dock-panel = root.dock-panel == 1 ? 0 : 1;
+                            }
+                        }
+
+                        // Separator between tabs.
+                        Rectangle {
+                            x: 7px;
+                            y: 84px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 92px;
+                            letters: ["S", "Y", "S", "T", "E", "M"];
+                            active: root.dock-panel == 2;
+                            clicked => {
+                                root.dock-panel = root.dock-panel == 2 ? 0 : 2;
+                            }
+                        }
+                    }
+
+                    // Sliding panel.
+                    Rectangle {
+                        x: 30px;
+                        width: 380px;
+                        height: 100%;
+                        background: Pal.panel;
+                        visible: root.dock-panel != 0;
+
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            height: 100%;
+                            background: Pal.line;
+                        }
+
+                        // ── Activity log ────────────────────────────────
+                        if root.dock-panel == 1: VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                SectionLabel {
+                                    text: "ACTIVITY LOG";
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Mono {
+                                    text: "\{root.log-lines.length}";
+                                    color: Pal.text-mute;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rule { }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+                                viewport-height: root.log-lines.length * 30px;
+
+                                VerticalLayout {
+                                    alignment: start;
+                                    spacing: 2px;
+
+                                    // Newest first, so the live line is always
+                                    // at the top and no autoscroll is needed
+                                    // to fight the user's own scrolling.
+                                    for line in root.log-lines: Text {
+                                        text: line;
+                                        color: Pal.text-dim;
+                                        font-size: 10.5px;
+                                        font-family: Pal.mono;
+                                        wrap: word-wrap;
+                                        min-height: 28px;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── System ──────────────────────────────────────
+                        if root.dock-panel == 2: ScrollView {
+                            viewport-height: 560px;
+
+                            VerticalLayout {
+                                alignment: start;
+                                padding: 10px;
+                                spacing: 14px;
+
+                                StatBox {
+                                    title: "GPU";
+                                    StatRow { label: "device"; value: root.sys-device; tint: Pal.text; }
+                                    StatRow {
+                                        label: "usage";
+                                        value: "\{root.sys-usage} %";
+                                        tint: root.sys-usage > 90 ? Pal.warn : Pal.stat;
+                                    }
+                                    StatRow {
+                                        label: "temp";
+                                        value: "\{root.sys-temp} °C";
+                                        tint: root.sys-temp >= 83 ? Pal.danger
+                                            : root.sys-temp >= 75 ? Pal.warn
+                                            : Pal.stat;
+                                    }
+                                    StatRow {
+                                        label: "clock";
+                                        value: "\{root.sys-clock} / \{root.sys-clock-max} MHz";
+                                    }
+                                    StatRow {
+                                        label: "power";
+                                        value: "\{Math.round(root.sys-power)} / \{Math.round(root.sys-power-max)} W";
+                                    }
+                                    StatRow {
+                                        label: "vram";
+                                        value: "\{Math.round(root.sys-vram-used * 10) / 10} / \{Math.round(root.sys-vram-total * 10) / 10} GB";
+                                        tint: root.sys-vram-free < 2.0 ? Pal.danger : Pal.stat;
+                                    }
+                                    StatRow {
+                                        label: "free";
+                                        value: "\{Math.round(root.sys-vram-free * 10) / 10} GB";
+                                    }
+                                    StatRow { label: "driver"; value: root.sys-driver; }
+                                }
+
+                                StatBox {
+                                    title: "RUNTIME";
+                                    StatRow { label: "app"; value: root.rt-app; }
+                                    StatRow { label: "ort"; value: root.rt-ort; }
+                                    StatRow { label: "onnxruntime"; value: root.rt-onnx; }
+                                    StatRow { label: "provider"; value: root.rt-provider; tint: Pal.accent; }
+                                    StatRow { label: "cuda"; value: root.rt-cuda; }
+                                    StatRow { label: "cudnn"; value: root.rt-cudnn; }
+                                    StatRow { label: "ffmpeg"; value: root.rt-ffmpeg; }
+                                }
+
+                                StatBox {
+                                    title: "MODELS";
+                                    StatRow {
+                                        label: "upscale";
+                                        value: "\{root.models-count}";
+                                        tint: root.models-count == 0 ? Pal.danger : Pal.stat;
+                                    }
+                                }
+
+                                Help {
+                                    lines: 3;
+                                    text: root.models-dir;
+                                    color: Pal.text-mute;
+                                }
+
+                                Help {
+                                    lines: 2;
+                                    text: "Drop .onnx models into that folder and restart "
+                                        + "to pick them up.";
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ══ Left column ══════════════════════════════════════════
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 0;
+
+                    // Preview header
+                    Rectangle {
+                        height: 30px;
+                        background: Pal.bg;
+
+                        HorizontalLayout {
+                            // Cleared to the right of the overhanging logo.
+                            padding-left: 106px;
+                            padding-right: 14px;
+                            spacing: 12px;
+
+                            Text {
+                                text: "BEFORE";
+                                color: Pal.text-dim;
+                                font-size: 10px;
+                                font-weight: 700;
+                                letter-spacing: 1.2px;
+                                vertical-alignment: center;
+                            }
+
+                            Mono {
+                                text: root.src-badge;
+                                color: Pal.text-mute;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            VerticalLayout {
+                                alignment: center;
+                                SegBtn {
+                                    text: "Split";
+                                    width: 62px;
+                                    active: root.view-mode == 0;
+                                    clicked => { root.view-mode = 0; }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                SegBtn {
+                                    text: "Side by side";
+                                    width: 92px;
+                                    active: root.view-mode == 1;
+                                    clicked => { root.view-mode = 1; }
+                                }
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            Mono {
+                                text: root.out-badge;
+                                color: Pal.accent;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "AFTER";
+                                color: Pal.text-dim;
+                                font-size: 10px;
+                                font-weight: 700;
+                                letter-spacing: 1.2px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Preview stage
+                    stage := Rectangle {
+                        vertical-stretch: 1;
+                        min-height: 220px;
+                        background: #040a0e;
+                        clip: true;
+
+                        // Empty state — drop target
+                        if !root.has-clip: Rectangle {
+                            width: 100%;
+                            height: 100%;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 16px;
+
+                                Text {
+                                    text: "Drop video here";
+                                    color: Pal.text-dim;
+                                    font-size: 19px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                }
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        height: 124px;
+                                        width: 124px;
+                                        border-width: 1px;
+                                        border-color: dz.has-hover ? Pal.accent-dim : Pal.line;
+                                        border-radius: 8px;
+                                        background: dz.has-hover ? Pal.panel : transparent;
+
+                                        Text {
+                                            text: "+";
+                                            color: dz.has-hover ? Pal.accent : Pal.text-mute;
+                                            font-size: 42px;
+                                            font-weight: 200;
+                                            width: 100%;
+                                            height: 100%;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+
+                                        dz := TouchArea {
+                                            clicked => { root.import-clicked(); }
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: "or click to browse  ·  mp4, mkv, mov, avi, webm";
+                                    color: Pal.text-mute;
+                                    font-size: 11.5px;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Loaded — before/after comparison.
+                        //
+                        // Both panes are drawn at an explicit rect rather than
+                        // with `image-fit: contain`, so zoom and pan apply
+                        // identically to each and the divider tracks the image
+                        // instead of the pane.
+                        if root.has-clip && root.view-mode == 0: view := Rectangle {
+                            width: 100%;
+                            height: 100%;
+
+                            property <float> pane-aspect: stage.width / stage.height;
+                            property <length> fit-w: root.clip-aspect > self.pane-aspect
+                                ? stage.width
+                                : stage.height * root.clip-aspect;
+                            property <length> fit-h: root.clip-aspect > self.pane-aspect
+                                ? stage.width / root.clip-aspect
+                                : stage.height;
+
+                            property <length> shown-w: self.fit-w * root.zoom;
+                            property <length> shown-h: self.fit-h * root.zoom;
+                            property <length> shown-x: (stage.width - self.shown-w) / 2 + root.pan-x;
+                            property <length> shown-y: (stage.height - self.shown-h) / 2 + root.pan-y;
+                            property <length> divider-x: self.shown-x + self.shown-w * root.split;
+
+                            // Zoom about the cursor: the point under the
+                            // pointer has to stay put, so pan is corrected
+                            // before the new zoom is committed.
+                            function zoom-by(cx: length, cy: length, factor: float) {
+                                root.pan-x = cx
+                                    - ((cx - self.shown-x) / self.shown-w)
+                                        * (self.fit-w * Math.clamp(root.zoom * factor, 1.0, 32.0))
+                                    - (stage.width
+                                        - self.fit-w * Math.clamp(root.zoom * factor, 1.0, 32.0)) / 2;
+                                root.pan-y = cy
+                                    - ((cy - self.shown-y) / self.shown-h)
+                                        * (self.fit-h * Math.clamp(root.zoom * factor, 1.0, 32.0))
+                                    - (stage.height
+                                        - self.fit-h * Math.clamp(root.zoom * factor, 1.0, 32.0)) / 2;
+                                root.zoom = Math.clamp(root.zoom * factor, 1.0, 32.0);
+                                if (root.zoom <= 1.0) {
+                                    root.pan-x = 0px;
+                                    root.pan-y = 0px;
+                                }
+                            }
+
+                            Image {
+                                x: view.shown-x;
+                                y: view.shown-y;
+                                width: view.shown-w;
+                                height: view.shown-h;
+                                source: root.frame-before;
+                                image-fit: fill;
+                                // Past ~2x the point is to inspect pixels, not
+                                // to see a smoothed approximation of them.
+                                image-rendering: root.zoom >= 2.0 ? pixelated : smooth;
+                            }
+
+                            // "After" pane, clipped to the right of the divider.
+                            Rectangle {
+                                x: Math.clamp(view.divider-x, 0px, stage.width);
+                                width: stage.width - Math.clamp(view.divider-x, 0px, stage.width);
+                                height: 100%;
+                                clip: true;
+
+                                Image {
+                                    x: view.shown-x - parent.x;
+                                    y: view.shown-y;
+                                    width: view.shown-w;
+                                    height: view.shown-h;
+                                    source: root.frame-after;
+                                    image-fit: fill;
+                                    image-rendering: root.zoom >= 2.0 ? pixelated : smooth;
+                                }
+                            }
+
+                            Rectangle {
+                                x: view.divider-x - 1px;
+                                width: 2px;
+                                height: 100%;
+                                background: Pal.accent;
+                                visible: view.divider-x > 0px && view.divider-x < stage.width;
+                            }
+
+                            Rectangle {
+                                x: view.divider-x - 11px;
+                                y: stage.height / 2 - 11px;
+                                width: 22px;
+                                height: 22px;
+                                border-radius: 11px;
+                                background: Pal.accent;
+                                border-width: 2px;
+                                border-color: Pal.bg;
+                                visible: view.divider-x > 0px && view.divider-x < stage.width;
+                            }
+
+                            sp := TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                mouse-cursor: self.pressed ? MouseCursor.grabbing
+                                            : MouseCursor.col-resize;
+
+                                // Left-drag moves the divider; right-drag pans.
+                                property <bool> panning: false;
+                                property <length> pan-start-x: 0px;
+                                property <length> pan-start-y: 0px;
+
+                                scroll-event(ev) => {
+                                    view.zoom-by(self.mouse-x, self.mouse-y,
+                                                 ev.delta-y > 0 ? 1.25 : 0.8);
+                                    return accept;
+                                }
+
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down) {
+                                        self.panning = ev.button == PointerEventButton.right;
+                                        self.pan-start-x = root.pan-x;
+                                        self.pan-start-y = root.pan-y;
+                                    }
+                                }
+
+                                moved => {
+                                    if (!self.pressed) { return; }
+                                    if (self.panning) {
+                                        root.pan-x = self.pan-start-x + self.mouse-x - self.pressed-x;
+                                        root.pan-y = self.pan-start-y + self.mouse-y - self.pressed-y;
+                                    } else {
+                                        root.split = Math.clamp(
+                                            (self.mouse-x - view.shown-x) / view.shown-w,
+                                            0.0, 1.0);
+                                    }
+                                }
+
+                                double-clicked => { root.reset-view(); }
+                            }
+                        }
+
+                        // Side-by-side: the same region of each image in its
+                        // own pane. Useful when the divider itself gets in the
+                        // way of judging a detail.
+                        if root.has-clip && root.view-mode == 1: sbs := Rectangle {
+                            width: 100%;
+                            height: 100%;
+
+                            property <length> pane-w: (stage.width - 2px) / 2;
+                            property <float> pane-aspect: self.pane-w / stage.height;
+                            property <length> fit-w: root.clip-aspect > self.pane-aspect
+                                ? self.pane-w
+                                : stage.height * root.clip-aspect;
+                            property <length> fit-h: root.clip-aspect > self.pane-aspect
+                                ? self.pane-w / root.clip-aspect
+                                : stage.height;
+                            property <length> shown-w: self.fit-w * root.zoom;
+                            property <length> shown-h: self.fit-h * root.zoom;
+                            property <length> img-x: (self.pane-w - self.shown-w) / 2 + root.pan-x;
+                            property <length> img-y: (stage.height - self.shown-h) / 2 + root.pan-y;
+
+                            Rectangle {
+                                x: 0;
+                                width: sbs.pane-w;
+                                height: 100%;
+                                clip: true;
+
+                                Image {
+                                    x: sbs.img-x;
+                                    y: sbs.img-y;
+                                    width: sbs.shown-w;
+                                    height: sbs.shown-h;
+                                    source: root.frame-before;
+                                    image-fit: fill;
+                                    image-rendering: root.zoom >= 2.0 ? pixelated : smooth;
+                                }
+                            }
+
+                            Rectangle {
+                                x: sbs.pane-w;
+                                width: 2px;
+                                height: 100%;
+                                background: Pal.line-accent;
+                            }
+
+                            Rectangle {
+                                x: sbs.pane-w + 2px;
+                                width: sbs.pane-w;
+                                height: 100%;
+                                clip: true;
+
+                                Image {
+                                    x: sbs.img-x;
+                                    y: sbs.img-y;
+                                    width: sbs.shown-w;
+                                    height: sbs.shown-h;
+                                    source: root.frame-after;
+                                    image-fit: fill;
+                                    image-rendering: root.zoom >= 2.0 ? pixelated : smooth;
+                                }
+                            }
+
+                            sbsa := TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                mouse-cursor: self.pressed ? MouseCursor.grabbing
+                                                          : MouseCursor.grab;
+                                property <length> pan-start-x: 0px;
+                                property <length> pan-start-y: 0px;
+
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down) {
+                                        self.pan-start-x = root.pan-x;
+                                        self.pan-start-y = root.pan-y;
+                                    }
+                                }
+
+                                // Zoom about the pane centre here rather than
+                                // the cursor: with two panes, a cursor-anchored
+                                // zoom pulls the two views out of alignment.
+                                scroll-event(ev) => {
+                                    root.zoom = Math.clamp(
+                                        root.zoom * (ev.delta-y > 0 ? 1.25 : 0.8), 1.0, 32.0);
+                                    if (root.zoom <= 1.0) {
+                                        root.pan-x = 0px;
+                                        root.pan-y = 0px;
+                                    }
+                                    return accept;
+                                }
+
+                                moved => {
+                                    if (self.pressed) {
+                                        root.pan-x = self.pan-start-x + self.mouse-x - self.pressed-x;
+                                        root.pan-y = self.pan-start-y + self.mouse-y - self.pressed-y;
+                                    }
+                                }
+
+                                double-clicked => { root.reset-view(); }
+                            }
+                        }
+
+                        // Status line — what the model is doing, bottom left.
+                        Rectangle {
+                            x: 12px;
+                            y: parent.height - 34px;
+                            width: Math.min(stage.width - 120px, 460px);
+                            height: 24px;
+                            background: Pal.panel;
+                            border-width: 1px;
+                            border-color: Pal.line;
+                            border-radius: 3px;
+                            opacity: 0.94;
+                            visible: root.preview-status != "";
+                            clip: true;
+
+                            // Fills tile by tile as the frame resolves.
+                            Rectangle {
+                                x: 0;
+                                width: parent.width * Math.clamp(root.preview-progress, 0.0, 1.0);
+                                height: 100%;
+                                background: Pal.accent-deep;
+
+                                animate width { duration: 120ms; easing: ease-out; }
+                            }
+
+                            Text {
+                                x: 9px;
+                                width: parent.width - 18px;
+                                height: 100%;
+                                text: root.preview-status;
+                                color: Pal.accent;
+                                font-size: 10.5px;
+                                font-family: Pal.mono;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+
+                        // Zoom readout
+                        Rectangle {
+                            x: parent.width - 104px;
+                            y: parent.height - 34px;
+                            width: 90px;
+                            height: 24px;
+                            background: Pal.panel;
+                            border-width: 1px;
+                            border-color: zt.has-hover ? Pal.line-accent : Pal.line;
+                            border-radius: 3px;
+                            opacity: 0.94;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 6px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    SearchGlyph { }
+                                }
+
+                                Text {
+                                    text: root.zoom <= 1.0
+                                        ? "Fit"
+                                        : "\{Math.round(root.zoom * 100)}%";
+                                    color: Pal.text-dim;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            zt := TouchArea {
+                                clicked => { root.reset-view(); }
+                            }
+                        }
+                    }
+
+                    // Transport + timeline
+                    Rectangle {
+                        height: 52px;
+                        background: Pal.panel;
+
+                        Rectangle { height: 1px; background: Pal.line; }
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 10px;
+                            padding-bottom: 10px;
+                            spacing: 12px;
+
+                            Rectangle {
+                                width: 32px;
+                                border-radius: 16px;
+                                background: pl.has-hover ? Pal.raised : Pal.card;
+                                border-width: 1px;
+                                border-color: Pal.line;
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        PlayGlyph {
+                                            tint: root.has-clip ? Pal.accent : Pal.text-mute;
+                                        }
+                                    }
+                                }
+
+                                pl := TouchArea { }
+                            }
+
+                            // Scrub track
+                            track := Rectangle {
+                                horizontal-stretch: 1;
+                                background: Pal.input;
+                                border-width: 1px;
+                                border-color: tl.has-hover ? Pal.line-accent : Pal.line;
+                                border-radius: 3px;
+                                clip: true;
+
+                                property <float> secs: root.playhead * root.clip-duration;
+                                property <int> mm: Math.floor(self.secs / 60);
+                                property <int> ss: Math.floor(Math.mod(self.secs, 60));
+                                property <int> frame: Math.round(self.secs * root.clip-fps);
+                                property <length> head-x:
+                                    Math.clamp((self.width - 2px) * root.playhead,
+                                               0px, self.width - 2px);
+
+                                Rectangle {
+                                    x: 1px;
+                                    y: 1px;
+                                    height: parent.height - 2px;
+                                    width: (parent.width - 2px) * root.playhead;
+                                    background: Pal.accent-deep;
+                                    border-radius: 2px;
+                                }
+
+                                Rectangle {
+                                    x: parent.head-x;
+                                    width: 2px;
+                                    height: 100%;
+                                    background: Pal.accent;
+                                    visible: root.has-clip;
+                                }
+
+                                Text {
+                                    x: 9px;
+                                    height: 100%;
+                                    text: !root.has-clip
+                                        ? "no clip loaded"
+                                        : "\{track.mm < 10 ? "0" : ""}\{track.mm}:"
+                                          + "\{track.ss < 10 ? "0" : ""}\{track.ss}"
+                                          + "  ·  frame \{track.frame}";
+                                    color: Pal.text-dim;
+                                    font-size: 10.5px;
+                                    font-family: Pal.mono;
+                                    vertical-alignment: center;
+                                }
+
+                                // Follows the playhead while scrubbing so the
+                                // position is readable without looking away.
+                                Rectangle {
+                                    x: Math.clamp(parent.head-x - 30px,
+                                                  0px, parent.width - 60px);
+                                    width: 60px;
+                                    height: 18px;
+                                    y: (parent.height - 18px) / 2;
+                                    background: Pal.accent;
+                                    border-radius: 3px;
+                                    visible: root.has-clip && (tl.pressed || tl.has-hover);
+
+                                    Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "\{track.frame}";
+                                        color: Pal.text-on-accent;
+                                        font-size: 10.5px;
+                                        font-family: Pal.mono;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                tl := TouchArea {
+                                    enabled: root.has-clip;
+                                    mouse-cursor: self.pressed ? MouseCursor.grabbing
+                                                              : MouseCursor.grab;
+                                    moved => {
+                                        if (tl.pressed) {
+                                            root.playhead = Math.clamp(
+                                                tl.mouse-x / self.width, 0.0, 1.0);
+                                        }
+                                    }
+                                    // Decode on release rather than on every
+                                    // motion event — scrubbing would otherwise
+                                    // queue a process spawn per pixel.
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.up) {
+                                            root.playhead = Math.clamp(
+                                                tl.mouse-x / self.width, 0.0, 1.0);
+                                            root.seek(root.playhead);
+                                        }
+                                    }
+                                }
+                            }
+
+                            Btn {
+                                text: "Add Task";
+                                width: 116px;
+                                primary: true;
+                                enabled: root.has-clip;
+                                clicked => { root.add-task(); }
+                            }
+                        }
+                    }
+
+                    // Filmstrip
+                    Rectangle {
+                        height: 88px;
+                        background: Pal.bg;
+
+                        HorizontalLayout {
+                            padding: 10px;
+                            spacing: 10px;
+                            alignment: start;
+
+                            Rectangle {
+                                width: 68px;
+                                height: 68px;
+                                border-width: 1px;
+                                border-color: imp.has-hover ? Pal.accent-dim : Pal.line;
+                                border-radius: Pal.radius;
+                                background: imp.has-hover ? Pal.card : Pal.panel;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 1px;
+
+                                    Text {
+                                        text: "+";
+                                        color: imp.has-hover ? Pal.accent : Pal.text-dim;
+                                        font-size: 20px;
+                                        font-weight: 200;
+                                        horizontal-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: "Import";
+                                        color: Pal.text-mute;
+                                        font-size: 10px;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+
+                                imp := TouchArea {
+                                    clicked => { root.import-clicked(); }
+                                }
+                            }
+
+                            Rectangle { width: 1px; background: Pal.line-soft; }
+
+                            Text {
+                                text: "No clips loaded";
+                                color: Pal.text-mute;
+                                font-size: 11.5px;
+                                vertical-alignment: center;
+                                visible: !root.has-clip;
+                            }
+                        }
+                    }
+
+                    // Export queue
+                    Rectangle {
+                        height: 150px;
+                        background: Pal.panel;
+
+                        Rectangle { height: 1px; background: Pal.line; }
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                SectionLabel {
+                                    text: "EXPORT QUEUE";
+                                    vertical-alignment: center;
+                                }
+
+                                Rectangle { horizontal-stretch: 1; }
+
+                                Mono {
+                                    text: "\{root.tasks.length} queued";
+                                    color: Pal.text-mute;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Rectangle {
+                                vertical-stretch: 1;
+
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: "No active export tasks — click \"Add Task\" to queue one.";
+                                    color: Pal.text-mute;
+                                    font-size: 11.5px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    visible: root.tasks.length == 0;
+                                }
+
+                                ScrollView {
+                                    width: 100%;
+                                    height: 100%;
+                                    visible: root.tasks.length > 0;
+                                    viewport-height: root.tasks.length * 44px;
+
+                                    VerticalLayout {
+                                        alignment: start;
+                                        spacing: 4px;
+
+                                        for t in root.tasks: Rectangle {
+                                            height: 40px;
+                                            background: Pal.card;
+                                            border-radius: 3px;
+                                            border-width: 1px;
+                                            border-color: t.running ? Pal.accent-dim
+                                                        : t.failed ? Pal.danger
+                                                        : Pal.line-soft;
+                                            clip: true;
+
+                                            // Fill tracks encode progress.
+                                            Rectangle {
+                                                x: 0;
+                                                width: parent.width
+                                                    * Math.clamp(t.progress, 0.0, 1.0);
+                                                height: 100%;
+                                                background: Pal.accent-deep;
+                                                opacity: 0.55;
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                spacing: 10px;
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    spacing: 2px;
+                                                    horizontal-stretch: 1;
+
+                                                    Text {
+                                                        text: t.name;
+                                                        color: Pal.text;
+                                                        font-size: 11.5px;
+                                                        font-weight: 500;
+                                                        overflow: elide;
+                                                    }
+
+                                                    Mono {
+                                                        text: t.detail;
+                                                        color: Pal.text-mute;
+                                                        overflow: elide;
+                                                    }
+                                                }
+
+                                                // Only meaningful once there is
+                                                // a file on disk to reveal.
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    width: t.done ? 106px : 0px;
+
+                                                    Rectangle {
+                                                        visible: t.done;
+                                                        height: 24px;
+                                                        border-radius: 3px;
+                                                        border-width: 1px;
+                                                        border-color: rv.has-hover
+                                                            ? Pal.accent-dim : Pal.line;
+                                                        background: rv.has-hover
+                                                            ? Pal.raised : Pal.panel;
+
+                                                        Text {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            text: "Open location";
+                                                            color: rv.has-hover
+                                                                ? Pal.accent : Pal.text-dim;
+                                                            font-size: 10.5px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+
+                                                        rv := TouchArea {
+                                                            mouse-cursor: pointer;
+                                                            clicked => { root.reveal(t.path); }
+                                                        }
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Mono {
+                                                        text: t.status;
+                                                        color: t.failed ? Pal.danger
+                                                             : t.running ? Pal.accent
+                                                             : Pal.text-dim;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ══ Settings rail ════════════════════════════════════════
+                railpane := Rectangle {
+                    width: Pal.rail-w;
+                    background: Pal.panel;
+
+                    // Slint's ScrollView does not derive its viewport from the
+                    // content, and a VerticalLayout given less height than it
+                    // needs overlaps its children rather than overflowing, so
+                    // the scroll height is stated outright. Values are
+                    // deliberately generous — overshooting costs a little dead
+                    // scroll space, undershooting brings the overlap back.
+                    property <length> content-h:
+                          140px
+                        + 260px
+                        + (root.src-open ? 210px : 0px)
+                        + (root.det-open ? 470px : 0px)
+                        + (root.stb-open ? 200px : 0px)
+                        + (root.fi-open  ?  90px : 0px)
+                        + (root.col-open ?  60px : 0px);
+
+                    Rectangle { width: 1px; background: Pal.line; }
+
+                    VerticalLayout {
+                        spacing: 0;
+
+                        ScrollView {
+                            vertical-stretch: 1;
+                            viewport-height: railpane.content-h;
+
+                            rail := VerticalLayout {
+                                // `alignment: start` is load-bearing: without
+                                // it the layout stretches to the viewport and,
+                                // when the viewport is shorter than the
+                                // content, compresses past its minimums and
+                                // overlaps sections instead of scrolling.
+                                alignment: start;
+                                padding: 12px;
+                                spacing: 5px;
+
+                                // ── Video info ──────────────────────────
+                                SectionLabel { text: "VIDEO INFO"; }
+
+                                Card {
+                                    height: 62px;
+
+                                    HorizontalLayout {
+                                        padding: 8px;
+                                        spacing: 10px;
+
+                                        Rectangle {
+                                            width: 76px;
+                                            background: Pal.input;
+                                            border-radius: 3px;
+                                            border-width: 1px;
+                                            border-color: Pal.line-soft;
+                                            clip: true;
+
+                                            Image {
+                                                width: 100%;
+                                                height: 100%;
+                                                source: root.thumb;
+                                                image-fit: contain;
+                                                visible: root.has-clip;
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 3px;
+                                            horizontal-stretch: 1;
+
+                                            Text {
+                                                text: root.has-clip ? root.clip-name
+                                                                   : "No video selected";
+                                                color: root.has-clip ? Pal.text : Pal.text-mute;
+                                                font-size: 11.5px;
+                                                font-weight: 500;
+                                                overflow: elide;
+                                            }
+
+                                            Mono {
+                                                text: root.clip-specs;
+                                                color: Pal.text-mute;
+                                                visible: root.has-clip;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle { height: 3px; }
+                                Rule { }
+
+                                // ── Source ──────────────────────────────
+                                SectionHeader {
+                                    title: "Source — planned";
+                                    gated: false;
+                                    enabled: true;
+                                    expanded <=> root.src-open;
+                                }
+
+                                if root.src-open: VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 10px;
+                                    spacing: 9px;
+
+                                    Help {
+                                        lines: 2;
+                                        text: "Preprocessing is not active yet. These controls are shown as the planned pipeline.";
+                                    }
+
+                                    FieldRow {
+                                        text: "Content";
+                                        accent: true;
+                                        enabled: false;
+                                        current <=> root.content-index;
+                                        changed(i) => { root.settings-changed(); }
+                                        items: [
+                                            "AI generated video",
+                                            "Film / movie (24p)",
+                                            "TV — shot on film",
+                                            "TV — shot on video",
+                                            "Modern digital",
+                                        ];
+                                    }
+
+                                    Help {
+                                        lines: 2;
+                                        text: "Sets the front-end. AI video skips deinterlace, "
+                                            + "telecine and deblock entirely — those stages only "
+                                            + "help broadcast-era sources.";
+                                    }
+
+                                    // Raised by the probe when the source has
+                                    // real fields — the front-end has to run
+                                    // before any detail model touches it.
+                                    if root.source-note != "": Rectangle {
+                                        height: 34px;
+                                        background: #3a2410;
+                                        border-radius: 3px;
+                                        border-width: 1px;
+                                        border-color: Pal.ember;
+
+                                        Text {
+                                            x: 9px;
+                                            width: parent.width - 18px;
+                                            height: 100%;
+                                            text: root.source-note;
+                                            color: Pal.ember;
+                                            font-size: 10.5px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    FieldRow {
+                                        text: "Restore";
+                                        enabled: false;
+                                        current <=> root.restore-index;
+                                        changed(i) => { root.settings-changed(); }
+                                        items: [
+                                            "None",
+                                            "Deblock — light",
+                                            "Deblock — DVD / MPEG-2",
+                                            "Dejpeg — heavy compression",
+                                        ];
+                                    }
+
+                                    CheckRow {
+                                        text: "Detect field order & telecine";
+                                        enabled: false;
+                                        checked <=> root.detect-fields;
+                                        toggled(v) => { root.settings-changed(); }
+                                    }
+
+                                    CheckRow {
+                                        text: "Preserve grain (extract & re-apply)";
+                                        enabled: false;
+                                        checked <=> root.preserve-grain;
+                                        toggled(v) => { root.settings-changed(); }
+                                    }
+                                }
+
+                                Rule { }
+
+                                // ── Detail model ────────────────────────
+                                // Not gated: the detail model *is* the app, so
+                                // a checkbox to switch it off is noise.
+                                SectionHeader {
+                                    title: "Detail Model";
+                                    gated: false;
+                                    enabled: true;
+                                    expanded <=> root.det-open;
+                                }
+
+                                if root.det-open: VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 10px;
+                                    spacing: 9px;
+
+                                    Help {
+                                        lines: 2;
+                                        text: "Backend is automatic: CUDA is preferred and CPU is used only when CUDA cannot load.";
+                                    }
+
+                                    FieldRow {
+                                        text: "Model";
+                                        accent: true;
+                                        items: root.model-names;
+                                        current <=> root.model-index;
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 7px;
+                                        Text {
+                                            text: "?";
+                                            color: Pal.accent;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            width: 12px;
+                                        }
+                                        Help {
+                                            lines: 3;
+                                            text: root.model-note;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+
+                                    FieldRow {
+                                        text: "Scale";
+                                        accent: true;
+                                        items: ["x2", "x3", "x4"];
+                                        current <=> root.scale-index;
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    SliderRow {
+                                        text: "Strength";
+                                        value <=> root.strength;
+                                        // Re-render on release, not on every
+                                        // pixel of the drag.
+                                        released => { root.settings-changed(); }
+                                    }
+
+                                    Help {
+                                        lines: 2;
+                                        text: "Flat blend toward the source. Softens everything "
+                                            + "equally, including detail you wanted.";
+                                    }
+
+                                    SliderRow {
+                                        text: "Detail limit";
+                                        value <=> root.detail-limit;
+                                        released => { root.settings-changed(); }
+                                    }
+
+                                    Help {
+                                        lines: 3;
+                                        text: "Caps how far a pixel may move from the source. "
+                                            + "Removes invented structure (freckles drawn as "
+                                            + "black strokes) while keeping sharpening. Try 0.2.";
+                                    }
+
+                                    CheckRow {
+                                        text: "Half precision (FP16)";
+                                        hint: "Uses a compatible FP16 model when available. Speedup is model- and tile-dependent.";
+                                        checked <=> root.fp16;
+                                        toggled(v) => { root.settings-changed(); }
+                                    }
+
+                                    CheckRow {
+                                        text: "Auto tile size";
+                                        hint: "Uses a larger tile on high-VRAM GPUs. Disable for the conservative 256px tile.";
+                                        checked <=> root.auto-tile;
+                                        toggled(v) => { root.settings-changed(); }
+                                    }
+                                }
+
+                                Rule { }
+
+                                // ── Stability (the temporal lock) ───────
+                                SectionHeader {
+                                    title: "Stability — planned";
+                                    gated: false;
+                                    enabled: false;
+                                    expanded <=> root.stb-open;
+                                }
+
+                                if root.stb-open: VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 10px;
+                                    spacing: 9px;
+
+                                    Rectangle {
+                                        background: Pal.violet-deep;
+                                        border-radius: 3px;
+                                        border-width: 1px;
+                                        border-color: Pal.violet;
+
+                                        VerticalLayout {
+                                            padding: 9px;
+                                            Help {
+                                                lines: 3;
+                                                text: "Holds invented detail still across frames so "
+                                                    + "texture stops boiling. This is the difference "
+                                                    + "between a video upscaler and an image one.";
+                                                color: Pal.text-dim;
+                                            }
+                                        }
+                                    }
+
+                                    SliderRow {
+                                        text: "Lock";
+                                        enabled: false;
+                                        value <=> root.lock;
+                                        released => { root.settings-changed(); }
+                                    }
+
+                                    SliderRow {
+                                        text: "Cut detect";
+                                        enabled: false;
+                                        value <=> root.cut-detect;
+                                        released => { root.settings-changed(); }
+                                    }
+
+                                    Help {
+                                        lines: 2;
+                                        text: "Higher Lock is steadier but smears fast motion. "
+                                            + "Cut detect resets the lock at scene changes.";
+                                    }
+                                }
+
+                                Rule { }
+
+                                // ── Frame interpolation ─────────────────
+                                fi-hdr := SectionHeader {
+                                    title: "Frame Interpolation — planned";
+                                    gated: false;
+                                    enabled: false;
+                                    expanded <=> root.fi-open;
+                                }
+
+                                if root.fi-open: VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 10px;
+                                    spacing: 9px;
+
+                                    FieldRow {
+                                        text: "Target";
+                                        current <=> root.interp-index;
+                                        enabled: false;
+                                        accent: false;
+                                        items: ["48 fps", "60 fps", "120 fps"];
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    CheckRow {
+                                        text: "Slow motion (keeps source fps)";
+                                        enabled: false;
+                                    }
+                                }
+
+                                Rule { }
+
+                                // ── Color ───────────────────────────────
+                                col-hdr := SectionHeader {
+                                    title: "Color — planned";
+                                    gated: false;
+                                    enabled: false;
+                                    expanded <=> root.col-open;
+                                }
+
+                                if root.col-open: VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 10px;
+                                    spacing: 9px;
+
+                                    CheckRow {
+                                        text: "Match to source";
+                                        hint: "Corrects any color drift the model introduces.";
+                                        checked: true;
+                                        enabled: col-hdr.enabled;
+                                    }
+                                }
+
+                                Rectangle { height: 6px; }
+                            }
+                        }
+
+                        // ── Sticky export footer ────────────────────────
+                        Rectangle { height: 1px; background: Pal.line; }
+
+                        Rectangle {
+                            height: 52px;
+                            background: Pal.card;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    GearGlyph { }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 2px;
+                                    horizontal-stretch: 1;
+
+                                    Text {
+                                        text: "Export format (fixed)";
+                                        color: Pal.text;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                    }
+
+                                    Mono {
+                                        text: root.export-summary;
+                                        color: Pal.text-mute;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "LOCKED";
+                                        color: Pal.text-mute;
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 56px;
+                            background: Pal.panel;
+
+                            HorizontalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+
+                                Btn {
+                                    text: "Export Next";
+                                    primary: true;
+                                    horizontal-stretch: 1;
+                                    enabled: root.tasks.length > 0 && !root.export-running;
+                                    clicked => { root.export-current(); }
+                                }
+
+                                Btn {
+                                    text: root.export-running ? "Cancel Export" : "Batch Export";
+                                    horizontal-stretch: 1;
+                                    enabled: root.tasks.length > 0;
+                                    clicked => {
+                                        if (root.export-running) { root.cancel-export(); }
+                                        else { root.batch-export(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Overhangs the toolbar's bottom edge, breaking the boundary.
+        Image {
+            x: 9px;
+            y: 0px;
+            width: 92px;
+            height: 92px;
+            source: @image-url("../assets/logo.png");
+            image-fit: contain;
+        }
+    }
+}
