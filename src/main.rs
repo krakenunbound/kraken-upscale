@@ -234,6 +234,11 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             ui.set_model_note(upscale::guidance(&model.name).into());
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
+            ui.set_scale_note(
+                upscale::scale_advice(&model, target_scale, &models)
+                    .unwrap_or_default()
+                    .into(),
+            );
             let interpolation_fps = ui
                 .get_interp_on()
                 .then(|| interpolate::target_fps(ui.get_interp_index()));
@@ -414,7 +419,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let request = request.clone();
-        ui.on_resume_preview(move || request());
+        ui.on_resume_preview(request);
     }
 
     ui.on_reveal(|path| reveal(&path));

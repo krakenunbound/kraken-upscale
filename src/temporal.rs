@@ -407,6 +407,25 @@ const RESIDUAL_TOLERANCE: f32 = 16.0;
 /// in source pixels.
 const CONSISTENCY_TOLERANCE: f32 = 2.5;
 
+/// Motion, in source pixels, beyond which the lock is fully released.
+///
+/// Warping is an approximation and its error grows with displacement: held
+/// detail belongs to a differently-lit, differently-occluded view of the
+/// surface, so beyond some distance carrying it forward smears rather than
+/// stabilises.
+///
+/// Set from measurement, not intuition. On real footage the estimator tracked
+/// cleanly up to ~3 px (residual reductions of 30–58%) and degraded badly at
+/// 9.8 px (17%). 16 px leaves well-tracked motion almost untouched while
+/// releasing decisively where tracking is known to fail.
+///
+/// Note this does **not** address the over-locking measured on near-static
+/// content, where displacement is under 1 px. That is inherent: the lock is a
+/// temporal filter and cannot distinguish invented texture that changed from
+/// real content that changed. Only the Lock strength trades that off, and
+/// choosing it needs visual judgement rather than a residual metric.
+const MOTION_RELEASE: f32 = 16.0;
+
 impl Motion {
     /// Bilinearly samples confidence at a full-resolution source pixel.
     pub fn confidence_at(&self, x: f32, y: f32) -> f32 {
@@ -436,7 +455,18 @@ impl Motion {
     }
 }
 
+/// Default-sensitivity form, used by tests and measurement.
+///
+/// The export path calls [`analyze_with`] instead, so the user's cut
+/// sensitivity applies.
+#[allow(dead_code)]
+pub fn analyze(prev: &Frame, cur: &Frame) -> Result<Motion, String> {
+    analyze_with(prev, cur, 0.4)
+}
+
 /// Estimates motion and decides where it can be trusted.
+///
+/// `cut_sensitivity` is 0..1; higher cuts more readily.
 ///
 /// Two independent checks, because they fail on different things:
 ///
@@ -448,15 +478,6 @@ impl Motion {
 ///   Where it does not, the pixel is occluded or the match was arbitrary. This
 ///   is what catches motion boundaries, which residual alone can miss when a
 ///   wrong match happens to score well.
-/// The export path calls [`analyze_with`] so the user's cut sensitivity
-/// applies; this default-sensitivity form is the one tests and measurement use.
-#[allow(dead_code)]
-pub fn analyze(prev: &Frame, cur: &Frame) -> Result<Motion, String> {
-    analyze_with(prev, cur, 0.4)
-}
-
-/// As [`analyze`], with the scene-cut sensitivity exposed (0..1, higher cuts
-/// more readily).
 pub fn analyze_with(prev: &Frame, cur: &Frame, cut_sensitivity: f32) -> Result<Motion, String> {
     let flow = estimate(prev, cur)?;
 
@@ -491,10 +512,17 @@ pub fn analyze_with(prev: &Frame, cur: &Frame, cut_sensitivity: f32) -> Result<M
             let consistency = 1.0 - (mismatch / CONSISTENCY_TOLERANCE).min(1.0);
             let quality = 1.0 - (residual[index] / RESIDUAL_TOLERANCE).min(1.0);
 
-            // Multiplied, not averaged: either failing alone is enough to make
-            // the warp untrustworthy, and averaging would let a good residual
-            // mask an occlusion.
-            (consistency * quality).clamp(0.0, 1.0)
+            // Release with displacement even when the match looks good: a
+            // confident warp over large motion still smears, because the held
+            // detail belongs to a differently-lit, differently-occluded view
+            // of the surface.
+            let displacement = (fx * fx + fy * fy).sqrt();
+            let settled = 1.0 - (displacement / MOTION_RELEASE).min(1.0);
+
+            // Multiplied, not averaged: any one failing is enough to make the
+            // warp untrustworthy, and averaging would let a good residual mask
+            // an occlusion.
+            (consistency * quality * settled).clamp(0.0, 1.0)
         })
         .collect();
 
@@ -737,6 +765,23 @@ mod tests {
             motion.mean_confidence() < 0.3,
             "a fade must not be locked, got {}",
             motion.mean_confidence()
+        );
+    }
+
+    /// Large displacement must release the lock even when the match is clean,
+    /// because held detail no longer describes the same view of the surface.
+    #[test]
+    fn large_motion_releases_the_lock() {
+        let prev = textured(256, 256, 0, 0);
+        let near = textured(256, 256, 2, 1);
+        let far = textured(256, 256, 22, 14);
+
+        let small = analyze(&prev, &near).expect("near").mean_confidence();
+        let large = analyze(&prev, &far).expect("far").mean_confidence();
+
+        assert!(
+            large < small * 0.7,
+            "large motion should be trusted much less: {small:.2} -> {large:.2}"
         );
     }
 

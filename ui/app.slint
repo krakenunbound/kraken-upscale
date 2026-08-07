@@ -39,6 +39,8 @@ export component MainWindow inherits Window {
     in property <string> preview-status: "";
     in property <float> preview-progress: 0;
     in property <string> model-note: "";
+    /// Set when the chosen model's native scale exceeds the requested one.
+    in property <string> scale-note: "";
     in-out property <float> strength: 1.0;
     in-out property <float> detail-limit: 1.0;
     in-out property <bool> fp16: true;
@@ -1436,6 +1438,26 @@ export component MainWindow inherits Window {
                                         items: ["x2", "x3", "x4"];
                                         current <=> root.scale-index;
                                         changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    // Only present when the model's native
+                                    // scale exceeds the requested one, which
+                                    // costs real time for no extra output.
+                                    if root.scale-note != "": HorizontalLayout {
+                                        spacing: 7px;
+                                        Text {
+                                            text: "!";
+                                            color: Pal.ember;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            width: 12px;
+                                        }
+                                        Help {
+                                            lines: 3;
+                                            text: root.scale-note;
+                                            color: Pal.ember;
+                                            horizontal-stretch: 1;
+                                        }
                                     }
 
                                     SliderRow {

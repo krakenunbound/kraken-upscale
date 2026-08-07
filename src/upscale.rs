@@ -58,6 +58,31 @@ pub fn guidance(name: &str) -> &'static str {
     }
 }
 
+/// Warns when the model's native scale is far above the requested one.
+///
+/// A 4x model asked for 2x still runs at 4x internally and is then averaged
+/// down, so it costs four times the pixels for the same output. That is a
+/// deliberate quality lever — the downsample suppresses invented artifacts —
+/// but it is a large, silent cost, and a native-scale model is usually the
+/// better trade when a matching one is installed.
+pub fn scale_advice(model: &ModelEntry, target: u32, installed: &[ModelEntry]) -> Option<String> {
+    if model.scale <= target || model.scale == 0 {
+        return None;
+    }
+
+    let factor = (model.scale / target.max(1)).pow(2);
+    let alternative = installed
+        .iter()
+        .find(|m| m.scale == target && m.name != model.name)
+        .map(|m| format!(" — {} is native {target}x", m.name))
+        .unwrap_or_default();
+
+    Some(format!(
+        "{}x model for a {target}x target: ~{factor}x the work, then averaged down{alternative}.",
+        model.scale
+    ))
+}
+
 /// Index of the best default model for photographic content.
 pub fn preferred_default(models: &[ModelEntry]) -> usize {
     // Anything anime- or face-specific is a poor first impression on the
@@ -661,6 +686,40 @@ fn blend_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(name: &str, scale: u32) -> ModelEntry {
+        ModelEntry {
+            name: name.into(),
+            file: format!("{name}.onnx"),
+            fp16_file: None,
+            scale,
+            architecture: "rrdb".into(),
+        }
+    }
+
+    #[test]
+    fn scale_advice_warns_only_when_the_model_overshoots() {
+        let installed = vec![entry("Big", 4), entry("Small", 2)];
+
+        // Matching scale: nothing to say.
+        assert!(scale_advice(&entry("Small", 2), 2, &installed).is_none());
+        // Model below target still runs once; no warning.
+        assert!(scale_advice(&entry("Small", 2), 4, &installed).is_none());
+        // Unknown scale is probed later, so stay quiet.
+        assert!(scale_advice(&entry("Unknown", 0), 2, &installed).is_none());
+
+        let advice = scale_advice(&entry("Big", 4), 2, &installed).expect("warns");
+        assert!(advice.contains("~4x the work"), "{advice}");
+        assert!(advice.contains("Small"), "should name the native option: {advice}");
+    }
+
+    #[test]
+    fn scale_advice_omits_alternative_when_none_installed() {
+        let installed = vec![entry("Big", 4)];
+        let advice = scale_advice(&entry("Big", 4), 2, &installed).expect("warns");
+        assert!(advice.contains("~4x the work"), "{advice}");
+        assert!(!advice.contains(" — "), "no alternative to name: {advice}");
+    }
 
     #[test]
     fn color_match_corrects_channel_drift() {
