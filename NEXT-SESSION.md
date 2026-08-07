@@ -38,9 +38,32 @@ The current easy-launch release is also staged at:
 F:\Video Upscale\Kraken Upscale.exe
 ```
 
-It was verified from that exact path with the root `cuda/`, `models/`, provider
-DLLs, and bundled video tools. These generated payloads are intentionally
-ignored by Git and should be refreshed after a source rebuild.
+The staged folder is **relocatable**: every payload resolves relative to the
+executable.
+
+```text
+Kraken Upscale.exe
+ffmpeg/                          ffmpeg + ffprobe and their DLLs
+cuda/                            CUDA 13 + cuDNN 9 redistributables
+models/                          upscale models (.onnx / .pth)
+models/interpolation/            RIFE timestep model
+onnxruntime_providers_cuda.dll
+onnxruntime_providers_shared.dll
+```
+
+`ffmpeg/` beside the exe is required, not optional: without it `media::bin_dir`
+falls back to a compile-time absolute source path and the build only runs from
+the machine it was built on.
+
+To refresh after a rebuild:
+
+```text
+copy target\release\kraken-upscale.exe "Kraken Upscale.exe"
+copy target\release\onnxruntime_providers_*.dll .
+robocopy vendor\ffmpeg\bin ffmpeg /XF ffplay.exe
+```
+
+These generated payloads are intentionally ignored by Git.
 
 ## Completed reliability pass
 

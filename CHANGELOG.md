@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — packaging
+
+- Embedded the application icon in the executable, generated at 7 sizes
+  (16–256 px) from the kraken artwork and compiled in via `winresource`.
+  Explorer, the taskbar and Alt-Tab now show it. This is separate from the
+  Slint `icon:` property, which only sets the in-app window icon at runtime.
+  A missing resource compiler warns rather than failing the build.
+- **Fixed a portability gap in the staged release.** `media::bin_dir` looks for
+  `ffmpeg/` beside the executable and otherwise falls back to a compile-time
+  absolute source path, so the staged copy only ran from this exact directory.
+  The vendored binaries are now copied to `ffmpeg/` next to the exe, making the
+  folder relocatable. `cuda/`, `models/` and the RIFE model already resolved
+  beside-exe correctly.
+
+### Staged release layout
+
+```text
+Kraken Upscale.exe
+ffmpeg/                          ffmpeg + ffprobe and their DLLs
+cuda/                            CUDA 13 + cuDNN 9 redistributables
+models/                          upscale models (.onnx / .pth)
+models/interpolation/            RIFE timestep model
+onnxruntime_providers_cuda.dll
+onnxruntime_providers_shared.dll
+```
+
 ## Unreleased — Phase 1 step 3: lock wired into export
 
 ### Temporal lock is live
