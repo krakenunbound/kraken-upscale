@@ -384,6 +384,192 @@ fn sample(frame: &Frame, x: f32, y: f32) -> (u8, u8, u8) {
     (out[0], out[1], out[2])
 }
 
+/// Flow plus a per-cell measure of how far it can be trusted.
+pub struct Motion {
+    pub flow: Flow,
+    /// 0..1 per grid cell. 1 means the warp is reliable here.
+    pub confidence: Vec<f32>,
+    /// A hard edit. Nothing before it should be carried across.
+    pub cut: bool,
+}
+
+/// Residual above which a match is considered worthless, in 0..255 levels.
+///
+/// Good matches on real footage land at 2–4; a brightness change leaves no
+/// good match anywhere and pushes every cell well past this.
+const RESIDUAL_TOLERANCE: f32 = 16.0;
+
+/// Forward–backward disagreement above which a cell is considered occluded,
+/// in source pixels.
+const CONSISTENCY_TOLERANCE: f32 = 2.5;
+
+impl Motion {
+    /// Bilinearly samples confidence at a full-resolution source pixel.
+    pub fn confidence_at(&self, x: f32, y: f32) -> f32 {
+        let f = &self.flow;
+        if f.cols == 0 || f.rows == 0 {
+            return 0.0;
+        }
+        let gx = (x / f.cell as f32 - 0.5).clamp(0.0, (f.cols - 1) as f32);
+        let gy = (y / f.cell as f32 - 0.5).clamp(0.0, (f.rows - 1) as f32);
+        let x0 = gx.floor() as usize;
+        let y0 = gy.floor() as usize;
+        let x1 = (x0 + 1).min(f.cols - 1);
+        let y1 = (y0 + 1).min(f.rows - 1);
+        let tx = gx - x0 as f32;
+        let ty = gy - y0 as f32;
+        let c = &self.confidence;
+        let top = c[y0 * f.cols + x0] * (1.0 - tx) + c[y0 * f.cols + x1] * tx;
+        let bot = c[y1 * f.cols + x0] * (1.0 - tx) + c[y1 * f.cols + x1] * tx;
+        top * (1.0 - ty) + bot * ty
+    }
+
+    pub fn mean_confidence(&self) -> f32 {
+        if self.confidence.is_empty() {
+            return 0.0;
+        }
+        self.confidence.iter().sum::<f32>() / self.confidence.len() as f32
+    }
+}
+
+/// Estimates motion and decides where it can be trusted.
+///
+/// Two independent checks, because they fail on different things:
+///
+/// * **Match residual** — how well the warped previous frame actually predicts
+///   the current one, per cell. This is what catches a brightness change: a
+///   fade leaves no good match anywhere, and the residual stays high no matter
+///   which offset was chosen.
+/// * **Forward–backward consistency** — flow measured both ways should cancel.
+///   Where it does not, the pixel is occluded or the match was arbitrary. This
+///   is what catches motion boundaries, which residual alone can miss when a
+///   wrong match happens to score well.
+pub fn analyze(prev: &Frame, cur: &Frame) -> Result<Motion, String> {
+    let flow = estimate(prev, cur)?;
+
+    if crate::interpolate::is_scene_cut(prev, cur) {
+        let confidence = vec![0.0; flow.dx.len()];
+        return Ok(Motion {
+            flow,
+            confidence,
+            cut: true,
+        });
+    }
+
+    let backward = estimate(cur, prev)?;
+    let warped = warp(prev, &flow, 1.0);
+    let residual = cell_residuals(&warped, cur, &flow);
+
+    let cols = flow.cols;
+    let confidence = (0..flow.dx.len())
+        .into_par_iter()
+        .map(|index| {
+            let fx = flow.dx[index];
+            let fy = flow.dy[index];
+
+            // Where does this cell land in the current frame, and does the
+            // reverse estimate bring it back?
+            let cx = ((index % cols) as f32 + 0.5) * flow.cell as f32;
+            let cy = ((index / cols) as f32 + 0.5) * flow.cell as f32;
+            let (bx, by) = backward.at(cx + fx, cy + fy);
+            let mismatch = ((fx + bx).powi(2) + (fy + by).powi(2)).sqrt();
+
+            let consistency = 1.0 - (mismatch / CONSISTENCY_TOLERANCE).min(1.0);
+            let quality = 1.0 - (residual[index] / RESIDUAL_TOLERANCE).min(1.0);
+
+            // Multiplied, not averaged: either failing alone is enough to make
+            // the warp untrustworthy, and averaging would let a good residual
+            // mask an occlusion.
+            (consistency * quality).clamp(0.0, 1.0)
+        })
+        .collect();
+
+    Ok(Motion {
+        flow,
+        confidence,
+        cut: false,
+    })
+}
+
+/// Mean absolute difference between two frames, per flow grid cell.
+fn cell_residuals(a: &Frame, b: &Frame, flow: &Flow) -> Vec<f32> {
+    let w = a.width as usize;
+    let h = a.height as usize;
+    let cell = flow.cell;
+
+    (0..flow.cols * flow.rows)
+        .into_par_iter()
+        .map(|index| {
+            let x0 = (index % flow.cols) * cell;
+            let y0 = (index / flow.cols) * cell;
+            let x1 = (x0 + cell).min(w);
+            let y1 = (y0 + cell).min(h);
+            if x0 >= x1 || y0 >= y1 {
+                return RESIDUAL_TOLERANCE;
+            }
+
+            let mut sum = 0.0f32;
+            let mut n = 0u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = (y * w + x) * 3;
+                    sum += (a.rgb[p] as f32 - b.rgb[p] as f32).abs();
+                    n += 1;
+                }
+            }
+            sum / n.max(1) as f32
+        })
+        .collect()
+}
+
+/// Holds invented detail still: blends the warped previous output into the
+/// current detail wherever the motion estimate can be trusted.
+///
+/// `strength` is the user-facing lock amount; confidence scales it down per
+/// region. `scale` maps source-resolution flow onto the upscaled frames.
+pub fn lock(
+    previous_output: &Frame,
+    current_detail: &Frame,
+    motion: &Motion,
+    strength: f32,
+    scale: f32,
+) -> Frame {
+    let strength = strength.clamp(0.0, 1.0);
+    if motion.cut || strength <= 0.0 {
+        return current_detail.clone();
+    }
+    if previous_output.width != current_detail.width
+        || previous_output.height != current_detail.height
+    {
+        // A resolution change mid-stream means there is nothing valid to carry
+        // forward.
+        return current_detail.clone();
+    }
+
+    let warped = warp(previous_output, &motion.flow, scale);
+    let w = current_detail.width as usize;
+    let mut rgb = vec![0u8; current_detail.rgb.len()];
+
+    rgb.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        let sy = y as f32 / scale;
+        for x in 0..w {
+            let weight = strength * motion.confidence_at(x as f32 / scale, sy);
+            let p = (y * w + x) * 3;
+            for c in 0..3 {
+                let fresh = current_detail.rgb[p + c] as f32;
+                let held = warped.rgb[p + c] as f32;
+                row[x * 3 + c] = (fresh + (held - fresh) * weight).clamp(0.0, 255.0) as u8;
+            }
+        }
+    });
+
+    Frame {
+        width: current_detail.width,
+        height: current_detail.height,
+        rgb,
+    }
+}
+
 /// Mean absolute per-channel difference, 0..255. The flicker metric.
 pub fn mean_abs_diff(a: &Frame, b: &Frame) -> f32 {
     if a.rgb.len() != b.rgb.len() || a.rgb.is_empty() {
@@ -496,6 +682,96 @@ mod tests {
         assert!(estimate(&a, &b).is_err());
     }
 
+    /// Uniformly brightens a frame, leaving all structure in place.
+    fn brighten(frame: &Frame, amount: i32) -> Frame {
+        Frame {
+            width: frame.width,
+            height: frame.height,
+            rgb: frame
+                .rgb
+                .iter()
+                .map(|v| (*v as i32 + amount).clamp(0, 255) as u8)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn confident_on_a_clean_translation() {
+        let prev = textured(160, 160, 0, 0);
+        let cur = textured(160, 160, 3, 2);
+        let motion = analyze(&prev, &cur).expect("analyze");
+        assert!(!motion.cut);
+        assert!(
+            motion.mean_confidence() > 0.5,
+            "clean translation should be trusted, got {}",
+            motion.mean_confidence()
+        );
+    }
+
+    /// The first measured failure mode: SAD is not intensity-invariant, so a
+    /// fade leaves no good match and the gate must refuse to lock.
+    #[test]
+    fn brightness_change_collapses_confidence() {
+        let prev = textured(160, 160, 0, 0);
+        let cur = brighten(&prev, 40);
+        let motion = analyze(&prev, &cur).expect("analyze");
+        assert!(
+            motion.mean_confidence() < 0.3,
+            "a fade must not be locked, got {}",
+            motion.mean_confidence()
+        );
+    }
+
+    #[test]
+    fn scene_cut_disables_the_lock_entirely() {
+        let prev = Frame {
+            width: 64,
+            height: 64,
+            rgb: vec![10; 64 * 64 * 3],
+        };
+        let cur = Frame {
+            width: 64,
+            height: 64,
+            rgb: vec![245; 64 * 64 * 3],
+        };
+        let motion = analyze(&prev, &cur).expect("analyze");
+        assert!(motion.cut, "opposite frames must register as a cut");
+
+        // And the blend must pass current detail through untouched.
+        let locked = lock(&prev, &cur, &motion, 1.0, 1.0);
+        assert_eq!(locked.rgb, cur.rgb);
+    }
+
+    #[test]
+    fn lock_holds_detail_on_a_static_scene() {
+        // Same source, but the "detail" differs — as it would when a model
+        // re-invents texture independently each frame.
+        let source = textured(128, 128, 0, 0);
+        let previous_output = textured(128, 128, 0, 0);
+        let mut current_detail = previous_output.clone();
+        for (i, v) in current_detail.rgb.iter_mut().enumerate() {
+            *v = (*v as i32 + if i % 7 == 0 { 26 } else { -14 }).clamp(0, 255) as u8;
+        }
+
+        let motion = analyze(&source, &source).expect("analyze");
+        let locked = lock(&previous_output, &current_detail, &motion, 1.0, 1.0);
+
+        let unlocked_flicker = mean_abs_diff(&current_detail, &previous_output);
+        let locked_flicker = mean_abs_diff(&locked, &previous_output);
+        assert!(
+            locked_flicker < unlocked_flicker * 0.5,
+            "lock failed to suppress invented detail: {unlocked_flicker} -> {locked_flicker}"
+        );
+    }
+
+    #[test]
+    fn zero_strength_is_a_passthrough() {
+        let a = textured(64, 64, 0, 0);
+        let b = textured(64, 64, 2, 0);
+        let motion = analyze(&a, &b).expect("analyze");
+        assert_eq!(lock(&a, &b, &motion, 0.0, 1.0).rgb, b.rgb);
+    }
+
     /// Real footage, which is the only measurement that decides whether the
     /// built-in estimator is good enough to keep.
     ///
@@ -527,9 +803,10 @@ mod tests {
                 crate::media::frame_at(&clip, (index + 1) as f64 * step, None).expect("cur");
 
             let started = std::time::Instant::now();
-            let flow = estimate(&prev, &cur).expect("estimate");
+            let motion = analyze(&prev, &cur).expect("analyze");
             let elapsed = started.elapsed();
-            let warped = warp(&prev, &flow, 1.0);
+            let flow = &motion.flow;
+            let warped = warp(&prev, flow, 1.0);
 
             let before = mean_abs_diff(&prev, &cur);
             let after = mean_abs_diff(&warped, &cur);
@@ -543,10 +820,12 @@ mod tests {
 
             println!(
                 "pair {index}->{}: residual {before:.2} -> {after:.2} ({reduction:+.0}%) · \
-                 flow {:.0}ms · mean motion {:.2}px",
+                 analyze {:.0}ms · motion {:.2}px · confidence {:.2}{}",
                 index + 1,
                 elapsed.as_secs_f32() * 1000.0,
-                flow.mean_magnitude()
+                flow.mean_magnitude(),
+                motion.mean_confidence(),
+                if motion.cut { " · CUT" } else { "" }
             );
         }
 

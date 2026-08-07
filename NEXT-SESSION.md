@@ -73,8 +73,17 @@ ignored by Git and should be refreshed after a source rebuild.
 
 ## Next product work
 
-1. **Temporal lock** — flow-guided stabilization of generated detail. This is
-   still the main feature required to close the video-quality gap.
+1. **Temporal lock** — flow-guided stabilization of generated detail. Still the
+   main feature required to close the video-quality gap. **In progress:**
+   - Phase 0 (baseline instrumentation) is done — `src/stages.rs`, per-stage
+     timings in the activity log. Measured steady state is 1.65 s/frame with
+     the model at 98% of it.
+   - Flow estimation and warping are done — `src/temporal.rs`, built-in
+     pyramid block matching, +35% mean residual reduction on real motion at
+     5–6 ms per pair.
+   - **Next: confidence gate and blending.** Forward–backward consistency, a
+     brightness-change guard, scene-cut reset, then wire into preview and
+     export and make the Stability controls real.
 2. **Source restoration** — deinterlace and deblock are active; IVTC and grain
    separation/re-injection remain.
 3. **Performance** — measured larger tiles and parallel post-processing landed;
