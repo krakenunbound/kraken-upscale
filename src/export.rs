@@ -20,6 +20,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use crate::interpolate::{self, Rife};
 use crate::media::{self, ClipInfo, Frame};
+use crate::stages::Stages;
 use crate::upscale::{self, Upscaler};
 
 #[derive(Clone)]
@@ -189,6 +190,9 @@ fn remove_partial(path: &std::path::Path) {
 }
 
 /// Runs an export to completion. `on_progress` receives (done, total) frames.
+///
+/// Returns the per-stage timing breakdown so callers can log where the time
+/// went — the Phase 0 baseline the temporal lock will be measured against.
 pub fn run(
     spec: &ExportSpec,
     up: &mut Upscaler,
@@ -197,7 +201,7 @@ pub fn run(
     overlap: u32,
     cancel: Arc<AtomicBool>,
     on_progress: &mut dyn FnMut(u64, u64),
-) -> Result<(), String> {
+) -> Result<Stages, String> {
     let (sw, sh) = (spec.clip.width, spec.clip.height);
     let frame_bytes = (sw as usize) * (sh as usize) * 3;
     let total = spec.output_frames();
@@ -232,37 +236,43 @@ pub fn run(
     let mut buf = vec![0u8; frame_bytes];
     let mut done = 0u64;
     let mut nothing = |_: u32, _: u32| {};
+    let stages = Stages::new();
 
     let processing = (|| -> Result<(), String> {
         let mut process_frame = |source: &Frame| -> Result<(), String> {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let out = up.run(source, tile, overlap, &mut nothing)?;
+            let out = stages.model(|| up.run(source, tile, overlap, &mut nothing))?;
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let colored = if spec.match_color {
-                upscale::match_color_to_source(&out, source)
-            } else {
-                out
-            };
-            let limited = upscale::clamp_deviation(&colored, source, spec.detail_limit * 255.0);
-            let blended = upscale::blend_toward_source(&limited, source, spec.strength);
-            let (ow, oh) = spec.output_size();
-            let final_frame = upscale::resample(&blended, ow, oh);
+            let final_frame = stages.post(|| {
+                let colored = if spec.match_color {
+                    upscale::match_color_to_source(&out, source)
+                } else {
+                    out
+                };
+                let limited = upscale::clamp_deviation(&colored, source, spec.detail_limit * 255.0);
+                let blended = upscale::blend_toward_source(&limited, source, spec.strength);
+                let (ow, oh) = spec.output_size();
+                upscale::resample(&blended, ow, oh)
+            });
 
-            enc_in
-                .write_all(&final_frame.rgb)
-                .map_err(|e| format!("encode write failed: {e}"))?;
+            stages.encode(|| {
+                enc_in
+                    .write_all(&final_frame.rgb)
+                    .map_err(|e| format!("encode write failed: {e}"))
+            })?;
 
             done += 1;
+            stages.frame_done();
             on_progress(done, total);
             Ok(())
         };
 
         let mut read_source = || -> Result<Option<Frame>, String> {
-            if !read_frame(&mut src_out, &mut buf)? {
+            if !stages.decode(|| read_frame(&mut src_out, &mut buf))? {
                 return Ok(None);
             }
             Ok(Some(Frame {
@@ -297,11 +307,14 @@ pub fn run(
                     if phase <= 0.0001 {
                         process_frame(&left)?;
                     } else {
-                        let mut generated = rife.run(&left, &right, phase)?;
-                        if spec.match_color && !interpolate::is_scene_cut(&left, &right) {
-                            let reference = interpolate::color_reference(&left, &right, phase);
-                            generated = upscale::match_color_to_source(&generated, &reference);
-                        }
+                        let generated = stages.interpolate(|| -> Result<Frame, String> {
+                            let mut generated = rife.run(&left, &right, phase)?;
+                            if spec.match_color && !interpolate::is_scene_cut(&left, &right) {
+                                let reference = interpolate::color_reference(&left, &right, phase);
+                                generated = upscale::match_color_to_source(&generated, &reference);
+                            }
+                            Ok(generated)
+                        })?;
                         process_frame(&generated)?;
                     }
                     output_index += 1;
@@ -357,7 +370,7 @@ pub fn run(
         return Err(format!("encoder failed: {}", encoder_text.trim()));
     }
 
-    Ok(())
+    Ok(stages)
 }
 
 #[cfg(test)]
@@ -421,6 +434,84 @@ mod tests {
 
         let mut partial = std::io::Cursor::new(vec![1u8; 5]);
         assert!(read_frame(&mut partial, &mut frame).is_err());
+    }
+
+    /// Phase 0 of ENHANCEMENTS.md: the unlocked reference export.
+    ///
+    /// Prints the per-stage breakdown so the temporal lock has something
+    /// concrete to be measured against, and so a later "optimisation" that
+    /// moves cost between stages rather than removing it is visible.
+    ///
+    /// Run with:
+    /// `cargo test --release baseline_stage_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore = "set KRAKEN_TEST_CLIP to measure the unlocked export baseline"]
+    fn baseline_stage_timings() {
+        let _ = crate::cuda::prepare();
+        let source = std::env::var_os("KRAKEN_TEST_CLIP")
+            .map(PathBuf::from)
+            .expect("KRAKEN_TEST_CLIP is required");
+        let temp = std::env::temp_dir();
+        let input = temp.join(format!("kraken-baseline-in-{}.mkv", std::process::id()));
+        let output = temp.join(format!("kraken-baseline-out-{}.mp4", std::process::id()));
+
+        // Half a second at native resolution: long enough for per-frame
+        // averages to mean something, short enough to rerun casually.
+        let status = quiet(&mut Command::new(media::ffmpeg()))
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&source)
+            .args(["-t", "0.5", "-an", "-c:v", "ffv1"])
+            .arg(&input)
+            .status()
+            .expect("create baseline test clip");
+        assert!(status.success());
+
+        let clip = media::probe(&input).expect("probe baseline clip");
+        let model = upscale::registry()
+            .into_iter()
+            .find(|entry| entry.name.contains("UltraSharp"))
+            .expect("find UltraSharp");
+        let mut up = Upscaler::load(&model, true).expect("load detail model");
+        assert_eq!(up.provider, "CUDA", "baseline must measure the GPU path");
+
+        let spec = ExportSpec {
+            clip,
+            model,
+            target_scale: 2,
+            strength: 1.0,
+            detail_limit: 1.0,
+            source_treatment: media::SourceTreatment::default(),
+            match_color: true,
+            interpolation_fps: None,
+            fp16: true,
+            tile: crate::recommended_tile(),
+            out_path: output.clone(),
+            codec: "h264_nvenc".into(),
+            cq: 19,
+        };
+
+        let wall = std::time::Instant::now();
+        let stages = run(
+            &spec,
+            &mut up,
+            None,
+            spec.tile,
+            16,
+            Arc::new(AtomicBool::new(false)),
+            &mut |_, _| {},
+        )
+        .expect("baseline export");
+        let wall = wall.elapsed();
+
+        println!("\n=== UNLOCKED BASELINE ===");
+        println!("clip     {}x{}", spec.clip.width, spec.clip.height);
+        println!("model    {} ({}x native)", spec.model.name, up.scale);
+        println!("tile     {}px", spec.tile);
+        println!("{}", stages.summary(wall));
+        println!("=========================\n");
+
+        let _ = std::fs::remove_file(input);
+        let _ = std::fs::remove_file(output);
     }
 
     #[test]

@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — Phase 0 export instrumentation
+
+### Stage timing
+
+- Added `src/stages.rs`: per-stage accumulator for the export pipeline
+  (decode, interpolate, model, post, encode).
+- Changed `export::run` to return the timing breakdown; the summary is written
+  to the activity log when an export completes.
+- Separated the first model call from the steady-state average. It carries
+  one-off CUDA session creation and cuDNN autotuning that never recur, and
+  folding it into the mean makes short runs look far slower than reality.
+- Added `baseline_stage_timings`, an ignored test that measures an unlocked
+  reference export and prints the breakdown, giving the temporal lock something
+  concrete to be judged against.
+
+### Measurement corrections
+
+- **The previously recorded 2.56 s "model pass @ 896px tiles" is the one-off
+  warm-up cost, not the per-frame model time.** Measured steady state on the
+  same clip and tile size is **1.65 s/frame** — 36% faster than documented.
+- The model stage is **98% of measured time**. Decode (5 ms), post (32 ms) and
+  encode write (1 ms) per frame are negligible, so optimisation effort belongs
+  entirely in inference.
+- A first run immediately after a build measured 17.1 s/frame versus 1.77 s on
+  the next identical run. Cold-start variance is roughly 10×, so any benchmark
+  must discard its first run.
+
+### Test environment
+
+- ONNX Runtime provider DLLs are emitted to `target/release/` but GPU tests run
+  from `target/release/deps/`. They must be copied across, and `KRAKEN_CUDA_DIR`
+  must point at the repository `cuda/` folder, or tests silently fall back to
+  CPU and fail an unrelated assertion.
+
 ## Unreleased — 2026-08-06 reliability and native-model pass
 
 ### Model loading

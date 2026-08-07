@@ -17,6 +17,7 @@ mod interpolate;
 mod media;
 mod pth;
 mod settings;
+mod stages;
 mod upscale;
 
 slint::include_modules!();
@@ -1144,8 +1145,9 @@ fn spawn_exporter(
                     cancel.clone(),
                     &mut on_progress,
                 ) {
-                    Ok(()) => {
-                        let mins = started.elapsed().as_secs_f32() / 60.0;
+                    Ok(stages) => {
+                        let wall = started.elapsed();
+                        let mins = wall.as_secs_f32() / 60.0;
                         set_task(
                             &handle,
                             idx,
@@ -1158,6 +1160,10 @@ fn spawn_exporter(
                             &handle,
                             format!("exported {} in {mins:.1} min", spec.out_path.display()),
                         );
+                        // Phase 0 baseline: where the time actually went, so
+                        // later pipeline stages have something to be measured
+                        // against rather than a single opaque total.
+                        log(&handle, stages.summary(wall));
                     }
                     Err(e) if e == "cancelled" => {
                         log(
