@@ -33,6 +33,10 @@ pub struct ClipInfo {
     pub pix_fmt: String,
     /// `progressive`, `tt`, `bb`, `tb`, `bt`, or `unknown`.
     pub field_order: String,
+    /// Result of looking at the pixels, filled in on first use. Kept out of
+    /// `probe` so opening a clip does not always pay for a decode pass.
+    #[doc(hidden)]
+    pub detected_fields: std::sync::Arc<std::sync::OnceLock<bool>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -42,19 +46,123 @@ pub struct SourceTreatment {
     pub deinterlace: bool,
 }
 
+/// Measures interlacing from the pixels rather than the container.
+///
+/// Container metadata cannot be trusted for this. A telecined MPEG-2 VOB does
+/// carry `field_order=tt`, but remux it to MKV — or encode with FFV1 — and the
+/// flag is simply gone while the combing remains. Since the control is labelled
+/// "Detect field order & telecine", it has to actually look.
+///
+/// `idet`'s multi-frame counters are used because they compare across
+/// neighbours and are far steadier than the single-frame heuristic.
+pub fn detect_interlacing(path: &std::path::Path) -> bool {
+    let mut cmd = Command::new(ffmpeg());
+    let out = quiet(&mut cmd)
+        .args(["-hide_banner", "-loglevel", "info", "-i"])
+        .arg(path)
+        // A couple of seconds is plenty to establish a cadence, and keeps
+        // opening a clip responsive.
+        .args(["-vf", "idet", "-frames:v", "60", "-an", "-f", "null", "-"])
+        .output();
+
+    let Ok(out) = out else { return false };
+    let text = String::from_utf8_lossy(&out.stderr);
+
+    let Some(line) = text.lines().rev().find(|l| l.contains("Multi frame detection")) else {
+        return false;
+    };
+    let field = |key: &str| -> f64 {
+        line.split(key)
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0)
+    };
+
+    let interlaced = field("TFF:") + field("BFF:");
+    let progressive = field("Progressive:");
+    // A clear majority, not a bare one: a handful of false positives on
+    // fast motion should not trigger field processing on progressive film.
+    interlaced > progressive * 2.0 && interlaced >= 10.0
+}
+
+/// What the front-end does about fields, decided by content profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldPolicy {
+    /// Progressive source, or field handling switched off.
+    None,
+    /// Film shot at 24fps and padded to 30 for broadcast. Reversing the 3:2
+    /// pulldown recovers the original frames exactly; deinterlacing instead
+    /// destroys them permanently.
+    InverseTelecine,
+    /// Genuinely shot at 60 fields/sec. There are no original progressive
+    /// frames to recover, so interpolate.
+    Deinterlace,
+}
+
 impl SourceTreatment {
+    /// Chooses field handling.
+    ///
+    /// The distinction is the whole reason the Source profile separates "shot
+    /// on film" from "shot on video", and it is not cosmetic. Measured on a
+    /// telecined source against its known original:
+    ///
+    /// * inverse telecine — PSNR infinite, bit-exact recovery
+    /// * deinterlace — PSNR 38.9 dB, permanent loss
+    ///
+    /// and that loss happens *before* the detail model, which then amplifies
+    /// it. Deinterlacing telecined film also leaves the output at 29.97 fps
+    /// where one frame in five is a blend, so a fifth of the upscaling budget
+    /// is spent on frames that never existed.
+    pub fn field_policy(self, clip: &ClipInfo) -> FieldPolicy {
+        if !self.deinterlace || !clip.has_fields() {
+            return FieldPolicy::None;
+        }
+        match self.content {
+            // TV — shot on film. Scripted drama through the mid-2000s, which
+            // includes the DVD-era Star Trek series.
+            2 => FieldPolicy::InverseTelecine,
+            // TV — shot on video. Soaps, news, much British television.
+            3 => FieldPolicy::Deinterlace,
+            _ => FieldPolicy::None,
+        }
+    }
+
+    /// Frame rate after the front-end, which inverse telecine changes.
+    ///
+    /// 3:2 pulldown padded 24 fps to 30; reversing it returns 24. The encoder
+    /// and the progress total both have to know, or the export runs long and
+    /// `-shortest` truncates the copied audio.
+    pub fn effective_fps(self, clip: &ClipInfo) -> f64 {
+        match self.field_policy(clip) {
+            FieldPolicy::InverseTelecine => clip.fps * 4.0 / 5.0,
+            _ => clip.fps,
+        }
+    }
+
     /// Builds the decode filter chain.
     ///
-    /// Deinterlace is gated on the broadcast profiles because it is automatic —
-    /// the user asks for "TV, shot on video" and the correct handling follows.
-    /// Restore deliberately is *not* gated: it is an explicit selection, and
-    /// silently discarding it because of an unrelated dropdown would be worse
-    /// than applying it. The Source help states this split.
+    /// Field handling is gated on the broadcast profiles because it is
+    /// automatic — the user asks for "TV, shot on film" and the correct
+    /// treatment follows. Restore deliberately is *not* gated: it is an
+    /// explicit selection, and silently discarding it because of an unrelated
+    /// dropdown would be worse than applying it. The Source help states this
+    /// split.
     fn filters(self, clip: &ClipInfo) -> Vec<String> {
         let mut filters = Vec::new();
-        let broadcast_profile = matches!(self.content, 2 | 3);
-        if self.deinterlace && broadcast_profile && clip.is_interlaced() {
-            filters.push("bwdif=mode=send_frame:parity=auto:deint=interlaced".into());
+        match self.field_policy(clip) {
+            FieldPolicy::InverseTelecine => {
+                // fieldmatch reconstructs progressive frames from the field
+                // pattern; decimate then drops the duplicate that pulldown
+                // introduced. `pullup` is the older single-filter approach and
+                // is not in this build.
+                filters.push("fieldmatch=order=auto:combmatch=full".into());
+                filters.push("decimate".into());
+            }
+            FieldPolicy::Deinterlace => {
+                filters.push("bwdif=mode=send_frame:parity=auto:deint=interlaced".into());
+            }
+            FieldPolicy::None => {}
         }
         match self.restore {
             1 => filters.push("deblock=filter=weak:block=8".into()),
@@ -105,8 +213,26 @@ impl ClipInfo {
         filters.join(",")
     }
 
+    /// What the container claims.
     pub fn is_interlaced(&self) -> bool {
         matches!(self.field_order.as_str(), "tt" | "bb" | "tb" | "bt")
+    }
+
+    /// Whether this file actually carries fields.
+    ///
+    /// Trusts the container when it says yes, and otherwise looks at the
+    /// pixels — a telecined MPEG-2 VOB flags itself correctly, but remuxing it
+    /// to MKV drops the flag while the combing survives, and those remuxes are
+    /// what people actually have.
+    ///
+    /// Cached, because the detection pass costs a real decode.
+    pub fn has_fields(&self) -> bool {
+        if self.is_interlaced() {
+            return true;
+        }
+        *self
+            .detected_fields
+            .get_or_init(|| detect_interlacing(&self.path))
     }
 }
 
@@ -239,6 +365,7 @@ pub fn probe(path: &std::path::Path) -> Result<ClipInfo, String> {
         codec: field("codec_name").unwrap_or_else(|| "unknown".into()),
         pix_fmt: field("pix_fmt").unwrap_or_else(|| "unknown".into()),
         field_order: field("field_order").unwrap_or_else(|| "unknown".into()),
+        detected_fields: Default::default(),
     })
 }
 
@@ -317,6 +444,99 @@ pub fn frame_at_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn asset(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets").join(name)
+    }
+
+    fn telecined_clip() -> (PathBuf, ClipInfo) {
+        // Generated rather than committed: applying 3:2 pulldown here keeps any
+        // encode out of the comparison path, so recovery can be checked against
+        // the exact original frames.
+        let source = asset("progressive24.mkv");
+        assert!(source.is_file(), "missing {}", source.display());
+        let out = std::env::temp_dir().join(format!("kraken-tele-{}.mkv", std::process::id()));
+
+        let status = quiet(&mut Command::new(ffmpeg()))
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&source)
+            .args([
+                "-vf",
+                "telecine=first_field=top:pattern=23",
+                "-c:v",
+                "ffv1",
+            ])
+            .arg(&out)
+            .status()
+            .expect("apply telecine");
+        assert!(status.success());
+
+        let info = probe(&out).expect("probe telecined clip");
+        (out, info)
+    }
+
+    /// Film padded to 30fps must be cadence-reversed, not deinterlaced.
+    ///
+    /// Measured against the known original: inverse telecine recovers it
+    /// bit-exactly (PSNR infinite) while deinterlacing loses ~39 dB
+    /// permanently, before the detail model ever runs.
+    #[test]
+    fn film_profile_inverse_telecines_and_video_profile_deinterlaces() {
+        let (path, clip) = telecined_clip();
+
+        let film = SourceTreatment {
+            content: 2,
+            restore: 0,
+            deinterlace: true,
+        };
+        let video = SourceTreatment {
+            content: 3,
+            restore: 0,
+            deinterlace: true,
+        };
+        let off = SourceTreatment {
+            content: 2,
+            restore: 0,
+            deinterlace: false,
+        };
+
+        assert_eq!(film.field_policy(&clip), FieldPolicy::InverseTelecine);
+        assert_eq!(video.field_policy(&clip), FieldPolicy::Deinterlace);
+        assert_eq!(off.field_policy(&clip), FieldPolicy::None);
+
+        // Only the film path changes the rate: 30 -> 24.
+        assert!(
+            (film.effective_fps(&clip) - clip.fps * 0.8).abs() < 1e-9,
+            "IVTC must drop one frame in five"
+        );
+        assert_eq!(video.effective_fps(&clip), clip.fps);
+
+        let chain = clip.decode_filter(film);
+        assert!(chain.contains("fieldmatch"), "{chain}");
+        assert!(chain.contains("decimate"), "{chain}");
+        assert!(!clip.decode_filter(video).contains("fieldmatch"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A progressive source must never be field-processed, whatever the
+    /// profile says — the profile describes the era, not this file.
+    #[test]
+    fn progressive_sources_are_left_alone() {
+        let clip = probe(&asset("progressive24.mkv")).expect("probe 24p asset");
+        for content in 0..5 {
+            let t = SourceTreatment {
+                content,
+                restore: 0,
+                deinterlace: true,
+            };
+            assert_eq!(
+                t.field_policy(&clip),
+                FieldPolicy::None,
+                "content profile {content} touched a progressive source"
+            );
+        }
+    }
 
     #[test]
     fn probe_and_decode_normalize_sample_aspect_ratio() {

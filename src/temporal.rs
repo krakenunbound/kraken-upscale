@@ -852,7 +852,7 @@ mod tests {
         }
         let clip = crate::media::probe(&path).expect("probe cut clip");
         let step = 1.0 / clip.fps.max(1.0);
-        let count = clip.frames.min(20).max(2);
+        let count = clip.frames.clamp(2, 20);
 
         let frames: Vec<Frame> = (0..count)
             .map(|i| {

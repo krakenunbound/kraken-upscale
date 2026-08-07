@@ -64,27 +64,52 @@ impl ExportSpec {
         )
     }
 
+    /// Source rate after the front-end. Inverse telecine returns 30 to 24, so
+    /// everything downstream has to work from this rather than `clip.fps`.
+    pub fn source_fps(&self) -> f64 {
+        self.source_treatment.effective_fps(&self.clip)
+    }
+
+    fn inverse_telecined(&self) -> bool {
+        self.source_treatment.field_policy(&self.clip)
+            == media::FieldPolicy::InverseTelecine
+    }
+
     pub fn output_fps(&self) -> u32 {
         self.interpolation_fps
-            .filter(|fps| *fps as f64 > self.clip.fps)
-            .unwrap_or_else(|| self.clip.fps.round().max(1.0) as u32)
+            .filter(|fps| *fps as f64 > self.source_fps())
+            .unwrap_or_else(|| self.source_fps().round().max(1.0) as u32)
     }
 
     pub fn output_fps_rate(&self) -> String {
         match self
             .interpolation_fps
-            .filter(|fps| *fps as f64 > self.clip.fps)
+            .filter(|fps| *fps as f64 > self.source_fps())
         {
             Some(fps) => format!("{fps}/1"),
+            // Keep the exact rational where possible: 24000/1001 is not 24,
+            // and rounding it desynchronises audio over a full episode.
+            None if self.inverse_telecined() => match self.clip.fps_rate.as_str() {
+                "30000/1001" => "24000/1001".into(),
+                "30/1" => "24/1".into(),
+                _ => format!("{:.6}", self.source_fps()),
+            },
             None if !self.clip.fps_rate.is_empty() => self.clip.fps_rate.clone(),
             None => "24/1".into(),
         }
     }
 
     pub fn output_frames(&self) -> u64 {
+        // Inverse telecine drops one frame in five before anything else runs.
+        let decoded = if self.inverse_telecined() {
+            (self.clip.frames as f64 * 4.0 / 5.0).round().max(1.0) as u64
+        } else {
+            self.clip.frames
+        };
+
         match self
             .interpolation_fps
-            .filter(|fps| *fps as f64 > self.clip.fps)
+            .filter(|fps| *fps as f64 > self.source_fps())
         {
             Some(fps) if self.clip.duration > 0.0 => {
                 (self.clip.duration * fps as f64).round().max(1.0) as u64
@@ -93,11 +118,11 @@ impl ExportSpec {
             // none. Scale the source frame count by the rate ratio instead;
             // falling back to the source count would export far too few frames
             // and `-shortest` would then truncate the copied audio to match.
-            Some(fps) if self.clip.fps > 0.0 => {
-                let ratio = fps as f64 / self.clip.fps;
-                ((self.clip.frames.max(1) as f64) * ratio).round().max(1.0) as u64
+            Some(fps) if self.source_fps() > 0.0 => {
+                let ratio = fps as f64 / self.source_fps();
+                ((decoded.max(1) as f64) * ratio).round().max(1.0) as u64
             }
-            _ => self.clip.frames.max(1),
+            _ => decoded.max(1),
         }
     }
 }
@@ -489,6 +514,7 @@ mod tests {
             codec: "test".into(),
             pix_fmt: "rgb24".into(),
             field_order: "progressive".into(),
+            detected_fields: Default::default(),
         }
     }
 
