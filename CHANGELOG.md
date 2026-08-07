@@ -39,6 +39,8 @@
 
 ### Interface and lifecycle
 
+- Replaced the conflicting legacy file-drop hook with the window framework's
+  native Explorer drop events and added whole-stage hover feedback.
 - Corrected compounding preview pan movement in split and side-by-side modes.
 - Closing the main window now exits the event loop after saving settings and
   requesting active export cancellation.

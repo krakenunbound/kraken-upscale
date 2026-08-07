@@ -44,6 +44,7 @@ export component MainWindow inherits Window {
     in-out property <bool> fp16: true;
     in-out property <bool> auto-tile: true;
     in property <bool> export-running: false;
+    in property <bool> drop-active: false;
     in property <float> clip-duration: 0;
     in property <float> clip-fps: 0;
 
@@ -467,6 +468,9 @@ export component MainWindow inherits Window {
                         if !root.has-clip: Rectangle {
                             width: 100%;
                             height: 100%;
+                            background: root.drop-active ? #071b1e : transparent;
+                            border-width: root.drop-active ? 2px : 0px;
+                            border-color: Pal.accent;
 
                             VerticalLayout {
                                 alignment: center;
@@ -474,7 +478,7 @@ export component MainWindow inherits Window {
 
                                 Text {
                                     text: "Drop video here";
-                                    color: Pal.text-dim;
+                                    color: root.drop-active ? Pal.accent : Pal.text-dim;
                                     font-size: 19px;
                                     font-weight: 600;
                                     horizontal-alignment: center;
@@ -486,13 +490,13 @@ export component MainWindow inherits Window {
                                         height: 124px;
                                         width: 124px;
                                         border-width: 1px;
-                                        border-color: dz.has-hover ? Pal.accent-dim : Pal.line;
+                                        border-color: root.drop-active || dz.has-hover ? Pal.accent-dim : Pal.line;
                                         border-radius: 8px;
-                                        background: dz.has-hover ? Pal.panel : transparent;
+                                        background: root.drop-active || dz.has-hover ? Pal.panel : transparent;
 
                                         Text {
                                             text: "+";
-                                            color: dz.has-hover ? Pal.accent : Pal.text-mute;
+                                            color: root.drop-active || dz.has-hover ? Pal.accent : Pal.text-mute;
                                             font-size: 42px;
                                             font-weight: 200;
                                             width: 100%;

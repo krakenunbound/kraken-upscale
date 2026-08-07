@@ -42,6 +42,8 @@ Import button.
 - Non-square-pixel sources are normalized to square-pixel display geometry.
 - Timing uses an explicit rational CFR conversion policy.
 - Preview panning is stable in both layouts.
+- Explorer file drag-and-drop uses the native window event stream and provides
+  visible hover feedback over the empty preview stage.
 - Automatic tile sizing is persisted and based on available VRAM.
 - Planned Source, Stability, Color, and Interpolation controls are clearly
   disabled instead of implying an active pipeline.

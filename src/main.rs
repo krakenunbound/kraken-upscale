@@ -491,7 +491,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some(ui) = handle.upgrade() else { return };
                 let open = open.clone();
                 let w = ui.as_weak();
-                match dnd::attach(ui.window(), open) {
+                let hover_ui = ui.as_weak();
+                match dnd::attach(ui.window(), open, move |active| {
+                    if let Some(ui) = hover_ui.upgrade() {
+                        ui.set_drop_active(active);
+                    }
+                }) {
                     Ok(()) => log(&w, "drag and drop ready"),
                     Err(e) => log(&w, format!("drag and drop unavailable: {e}")),
                 }

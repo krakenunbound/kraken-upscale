@@ -1,112 +1,50 @@
-//! Native file drag-and-drop.
-//!
-//! Slint has no cross-platform hook for OS file drops, so on Windows the
-//! window procedure is subclassed to catch `WM_DROPFILES` directly. The
-//! subclass runs on the UI thread (it *is* the message loop), so the callback
-//! can touch the window without marshalling.
+//! Desktop file drag-and-drop through Slint's native winit event stream.
 
-#[cfg(windows)]
-mod imp {
-    use std::cell::RefCell;
-    use std::path::PathBuf;
+use std::path::PathBuf;
 
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, WM_DROPFILES, WNDPROC,
-    };
+use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
 
-    type DropSink = Option<Box<dyn Fn(PathBuf)>>;
-
-    thread_local! {
-        static PREV_PROC: RefCell<isize> = const { RefCell::new(0) };
-        static SINK: RefCell<DropSink> = const { RefCell::new(None) };
+/// Registers callbacks for file drops and hover feedback on `window`.
+///
+/// Winit owns the platform drop target, so the event must be observed here
+/// rather than by installing a second native window procedure.
+pub fn attach<F, H>(window: &slint::Window, mut on_drop: F, mut on_hover: H) -> Result<(), String>
+where
+    F: FnMut(PathBuf) + 'static,
+    H: FnMut(bool) + 'static,
+{
+    if !window.has_winit_window() {
+        return Err("native window is not ready".into());
     }
 
-    unsafe extern "system" fn wnd_proc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        if msg == WM_DROPFILES {
-            let hdrop = wparam as HDROP;
-
-            // Only the first file: this is a single-clip editor, and silently
-            // loading an arbitrary one out of a multi-file drop is worse than
-            // taking the one the user aimed with.
-            let len = DragQueryFileW(hdrop, 0, std::ptr::null_mut(), 0);
-            if len > 0 {
-                let mut buf = vec![0u16; len as usize + 1];
-                let got = DragQueryFileW(hdrop, 0, buf.as_mut_ptr(), buf.len() as u32);
-                if got > 0 {
-                    let path = PathBuf::from(String::from_utf16_lossy(&buf[..got as usize]));
-                    SINK.with(|s| {
-                        if let Some(f) = s.borrow().as_ref() {
-                            f(path);
-                        }
-                    });
-                }
+    window.on_winit_window_event(move |_, event| {
+        match event {
+            WindowEvent::HoveredFile(_) => on_hover(true),
+            WindowEvent::HoveredFileCancelled => on_hover(false),
+            WindowEvent::DroppedFile(path) => {
+                on_hover(false);
+                on_drop(path.clone());
             }
-            DragFinish(hdrop);
-            return 0;
+            _ => {}
         }
+        EventResult::Propagate
+    });
 
-        let prev = PREV_PROC.with(|p| *p.borrow());
-        CallWindowProcW(
-            std::mem::transmute::<isize, WNDPROC>(prev),
-            hwnd,
-            msg,
-            wparam,
-            lparam,
-        )
-    }
+    Ok(())
+}
 
-    /// Registers `on_drop` for files dropped onto `window`.
-    ///
-    /// Must be called after the window is shown — there is no HWND before that.
-    pub fn attach<F>(window: &slint::Window, on_drop: F) -> Result<(), String>
-    where
-        F: Fn(PathBuf) + 'static,
-    {
-        // Bound separately: the intermediate would otherwise be dropped
-        // before the borrowed handle is read.
-        let owner = window.window_handle();
-        let handle = owner
-            .window_handle()
-            .map_err(|e| format!("no window handle: {e}"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        let RawWindowHandle::Win32(w) = handle.as_raw() else {
-            return Err("not a Win32 window".into());
+    #[test]
+    fn recognizes_winit_file_drop_event() {
+        let path = PathBuf::from(r"C:\video\clip.mp4");
+        let event = WindowEvent::DroppedFile(path.clone());
+        let extracted = match event {
+            WindowEvent::DroppedFile(path) => Some(path),
+            _ => None,
         };
-        let hwnd = w.hwnd.get() as HWND;
-
-        SINK.with(|s| *s.borrow_mut() = Some(Box::new(on_drop)));
-
-        unsafe {
-            let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wnd_proc as usize as isize);
-            if prev == 0 {
-                return Err("could not subclass window".into());
-            }
-            PREV_PROC.with(|p| *p.borrow_mut() = prev);
-            DragAcceptFiles(hwnd, 1);
-        }
-
-        Ok(())
+        assert_eq!(extracted, Some(path));
     }
 }
-
-#[cfg(not(windows))]
-mod imp {
-    use std::path::PathBuf;
-
-    pub fn attach<F>(_: &slint::Window, _: F) -> Result<(), String>
-    where
-        F: Fn(PathBuf) + 'static,
-    {
-        Err("file drop is only implemented for Windows".into())
-    }
-}
-
-pub use imp::attach;

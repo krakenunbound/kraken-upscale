@@ -32,6 +32,7 @@ Last updated: 2026-08-06
 - [x] B22 — machine-specific development runtime paths removed
 - [x] B23 — closed as a non-bug after review
 - [x] B24 — clean frame-boundary EOF and truncated-frame EOF are distinguished
+- [x] B26 — Explorer file drops use the native window event stream and show hover feedback
 
 All confirmed defects in this audit are closed. Native folder-drop loading is
 also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
@@ -199,6 +200,16 @@ also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
 - **What:** Inference, resample, or encoder-write errors can return before both ffmpeg children are explicitly killed/waited and before partial output is removed.
 - **Impact:** Stray ffmpeg work, incomplete files, and loss of the useful encoder error.
 - **Suggested fix:** Central cleanup/RAII guard covering decoder, encoder, stderr draining, and partial-file policy on every exit path.
+
+### B26 — Drop target text is shown but Explorer drops are ignored
+- **Where:** `src/dnd.rs`, `src/main.rs`, `ui/app.slint`
+- **What:** The app installed a legacy `WM_DROPFILES` window-procedure hook while
+  the window framework had already registered the modern OLE drop target.
+  Explorer delivered the file through the framework, so the legacy hook never
+  received it.
+- **Resolution:** Listen to the framework's native `DroppedFile`, `HoveredFile`,
+  and cancellation events. The empty stage now highlights while a valid file is
+  over the window and clears that state on drop or cancellation.
 
 ---
 
