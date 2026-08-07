@@ -112,17 +112,19 @@ the wrong conclusion about whether it is broken.
      confidence-weighted blend. Runs in export; Stability is a real control.
    - Measured: **+154.6% of model-added flicker removed** at **+2.2% wall
      cost** on near-static content, against a ≥50% bar.
-   - **Three things remain before sign-off:**
-     1. **Over-locking.** Locked output sits *below* the no-invented-detail
-        floor, so genuine source change is being suppressed too. Benign on
-        static content; the same mechanism smears motion. Consider lowering
-        the default Lock from 0.75 or making confidence fall off harder with
-        motion magnitude.
-     2. **Judge smearing by eye** on `SpaceVoyage_4`. A residual metric cannot
-        tell "held still correctly" from "smeared" — both reduce difference.
-     3. **No-cut-ghosting is unverified.** Neither test clip contains a hard
+   - Confidence releases with displacement (16 px, set from measurement), and
+     **the preview now shows the lock** — scrub off frame zero with Stability
+     on and the status line reports `lock 0.75 × held 0.80`.
+   - **Two things remain before sign-off, and both need your eyes:**
+     1. **Pick the default Lock value.** 0.75 measurably over-locks on
+        near-static content — locked output falls below the no-invented-detail
+        floor, meaning real source change is being smoothed too. That is
+        inherent to a temporal filter and cannot be metric-tuned away; it needs
+        someone to look at 0.5 / 0.65 / 0.75 in the preview and judge. The
+        preview makes this a minute's work now rather than an export each.
+     2. **No-cut-ghosting is unverified.** Neither test clip contains a hard
         edit, so the cut-reset path has only been exercised synthetically. A
-        clip with two spliced shots would close this.
+        clip with two spliced shots would close it.
 
    Reproduce the measurements:
 

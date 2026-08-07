@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — project audit (A1–A5)
+
+Fresh audit of the tree after the B33–B42 closeout. Findings were mostly
+product gaps rather than defects; the code itself is clippy-clean.
+
+### A1 — the temporal lock is now visible in the preview
+
+The lock was export-only, so Lock and Cut detect could only be judged by
+running a full export and waiting minutes. For a feature that is on by default
+and is the main quality differentiator, that made its controls unusable.
+
+The preview now renders the preceding frame too and shows the locked result,
+reporting the strength and the confidence actually held — e.g.
+`lock 0.75 × held 0.80`. It runs only when Stability is on and the playhead is
+off frame zero, and roughly doubles preview time, which the help discloses.
+
+Post-processing is factored into one closure so both frames get identical
+treatment; locking against a differently-processed previous frame would hold
+the wrong pixels.
+
+### A2 — confidence releases with displacement
+
+Held detail belongs to a differently-lit, differently-occluded view of the
+surface, so beyond some distance carrying it forward smears rather than
+stabilises.
+
+Threshold set from measurement: the estimator tracks cleanly to ~3 px (30–58%
+residual reduction) and degrades at 9.8 px (17%), so **16 px** leaves good
+tracking alone and releases where tracking is known to fail. Measured effect
+matches the intent — near-static pairs barely move (0.84 → 0.83) while the
+worst-tracked pair drops furthest (0.34 → 0.30).
+
+**This does not fix the over-locking measured on near-static content**, and the
+code says so. That is inherent: the lock is a temporal filter and cannot
+distinguish invented texture that changed from real content that changed. Only
+Lock strength trades it off — which is why A1 mattered more.
+
+### A3 — halved the per-frame copy
+
+The lock carried its source by cloning; it now reuses the previous buffer, so
+one full-frame copy happens per frame instead of two.
+
+### A5 — native-scale mismatch is no longer silent
+
+A 4× model for a 2× target does ~4× the work and nothing said so. The Scale
+control now warns, naming an installed native-scale alternative when one
+exists.
+
+### A4 — housekeeping
+
+Removed the empty `tools/` directory left by the Python converter, and cleared
+the last clippy warnings — including a doc block that had been orphaned onto
+the thin `analyze()` wrapper instead of the `analyze_with()` that does the work.
+
 ## Unreleased — bug audit closeout (B33–B42)
 
 All ten findings from the 2026-08-07 audit are closed. Nine were fixed; one did
