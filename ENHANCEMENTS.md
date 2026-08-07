@@ -144,8 +144,35 @@ for each output frame t:
 | Confidence | Match residual × forward–backward consistency (`temporal::analyze`) | **done** — 13–15 ms/pair |
 | Cuts | `interpolate::is_scene_cut`; disables the lock outright | **done** |
 | Blend | `temporal::lock`, confidence-weighted, scale-aware | **done** |
-| State | Last output + last source only (streamable; no full-clip buffer) | next |
-| UI | Enable Stability for real: on/off + lock strength | next |
+| State | Last output + last source only (streamable; no full-clip buffer) | **done** |
+| UI | Enable Stability for real: on/off + lock strength | **done** |
+
+### Acceptance measurement
+
+`SpaceVoyage_2` (near-static — the content the bar targets), with a strength-0
+export through the identical pipeline as the no-invented-detail floor:
+
+| | flicker | model added |
+|---|---|---|
+| floor (no invented detail) | 1.348 | — |
+| unlocked | 1.613 | 0.265 |
+| locked | 1.203 | **−0.145** |
+
+- **Model-added flicker removed: +154.6%** (bar: ≥50%) ✅
+- Wall cost **+2.2%**; lock stage 20 ms/frame, ~1% of total ✅
+- Moving clip: gate holds back correctly — confidence 0.71 vs 0.85 ✅
+
+**Open concern — over-locking.** Locked output sits 0.145 *below* the
+no-detail floor, meaning genuine source change is being suppressed too, not
+just invented detail. Harmless on static content, but it is the same mechanism
+that produces smearing on motion. Before Phase 1 is signed off:
+
+1. Judge smearing **by eye** on the moving clip — a residual metric cannot
+   distinguish "held still correctly" from "smeared".
+2. Consider lowering the default Lock from 0.75, or making confidence fall off
+   harder with motion magnitude.
+3. The no-cut-ghosting half of the bar is still unverified: neither test clip
+   contains a hard edit. A clip with a real cut is needed.
 
 **Confidence tracks warp quality on real footage** — it independently found
 both failure modes without being told about them:

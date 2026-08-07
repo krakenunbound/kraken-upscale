@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased — Phase 1 step 3: lock wired into export
+
+### Temporal lock is live
+
+- The lock runs in the export pipeline and **Stability is a real control**, no
+  longer a disabled placeholder.
+- It runs **last, on the finished frame**, so what gets held is exactly what was
+  written. Locking earlier would carry forward detail that later stages alter.
+- Only the previous output and the frame it came from are retained, so export
+  stays streaming regardless of clip length.
+- Cut sensitivity is plumbed through instead of being hardcoded at 0.28, mapped
+  inverted so a higher setting cuts more readily.
+- The stage summary reports lock cost and how much was actually held, so a run
+  where confidence collapsed everywhere no longer looks identical to one that
+  worked.
+- Preview still shows a single frame and is labelled as such — there is nothing
+  for a lock to hold still in one frame.
+
+### Measured — acceptance bar met, with a caveat
+
+On `SpaceVoyage_2` (near-static, the content the bar targets), using a
+strength-0 export through the identical pipeline as the no-invented-detail
+floor:
+
+| | flicker | model added |
+|---|---|---|
+| floor (no invented detail) | 1.348 | — |
+| unlocked | 1.613 | 0.265 |
+| locked | 1.203 | **−0.145** |
+
+- **Model-added flicker removed: +154.6%** against a ≥50% bar.
+- Wall cost **+2.2%** — the lock stage is 20 ms/frame, about 1% of total.
+- On the moving clip the gate correctly holds back: confidence 0.71 vs 0.85,
+  total flicker reduction 11.5% vs 25.4%.
+
+**The overshoot is the real finding.** Locked output sits 0.145 *below* the
+floor, so the lock is suppressing genuine source change as well as invented
+detail. Benign on near-static content; the same mechanism smears motion. The
+metric is deliberately left unclamped and warns about it — clamping would have
+reported a flattering "100% removed" and hidden the problem.
+
 ## Unreleased — Phase 1 step 2: confidence gate
 
 ### Trust, then blend
