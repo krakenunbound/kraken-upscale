@@ -264,7 +264,12 @@ pub fn frame_at_with(
     let (w, h) = scale_to.unwrap_or((clip.width, clip.height));
 
     let mut cmd = Command::new(ffmpeg());
-    quiet(&mut cmd).args(["-v", "error", "-ss", &format!("{at_secs:.3}")]);
+    // Microsecond precision, not milliseconds. A frame at 24fps spans 41.667ms,
+    // so frame 2 starts at 0.083333s — a request rounded to "0.083" lands back
+    // inside frame 1 and silently returns the previous frame. Same at 0.208 for
+    // frame 5. Scrubbing then shows stale frames and any frame-pair measurement
+    // compares a frame against itself.
+    quiet(&mut cmd).args(["-v", "error", "-ss", &format!("{at_secs:.6}")]);
     cmd.arg("-i").arg(&clip.path).args(["-frames:v", "1"]);
 
     let mut filters = treatment.filters(clip);
