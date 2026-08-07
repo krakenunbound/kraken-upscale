@@ -10,8 +10,37 @@ Last updated: 2026-08-06
 ## 1. What this is
 
 A native Windows video upscaler. Target quality: match Topaz on clean-ish
-sources, beat Aiarty everywhere. Target content: **old TV and movies**, and
-**AI-generated video**.
+sources, beat Aiarty everywhere.
+
+**Target content — corrected 2026-08-07 after auditing the real library.**
+
+The original brief was "old TV shows and movies, AI videos", which was read as
+DVD-era standard definition. That was wrong. The actual material is:
+
+| Source | Form |
+|---|---|
+| TV series rips (e.g. Star Trek Voyager) | 1440×1080 or 1920×1080, H.265 **10-bit**, progressive, 23.976 |
+| Film rips | Blu-ray, 1080p, film grain intact |
+| AI-generated video | 704×1248-class, clean, 8-bit |
+
+**There are no DVDs in the collection.** ~99% of use is downloaded rips.
+
+This reorders the work substantially:
+
+- **10-bit precision is the dominant quality gap.** The pipeline decodes to
+  `rgb24`, so a 10-bit source is quantised to 8 bits before the model sees it,
+  and encoded back out at 8 bits. Banding appears exactly where this content
+  lives — space, nebulae, dim interiors.
+- **Broadcast restoration is insurance.** IVTC and deinterlace are built and
+  tested (§8) but will rarely fire on progressive Blu-ray-era material.
+- **Grain handling rises in importance**, because film-sourced Blu-rays carry
+  genuine grain rather than the compression noise SD material carries.
+- **Detail models must be chosen for already-upscaled sources.** Several of
+  these rips are themselves upscales of SD masters, so they carry someone
+  else's artifacts. Conservative models (Remacri, RealESRGAN) are safer than
+  aggressive ones (UltraSharp, Siax) which sharpen those artifacts.
+
+Hard requirements from the outset:
 
 Hard requirements from the outset:
 

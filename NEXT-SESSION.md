@@ -98,9 +98,33 @@ the wrong conclusion about whether it is broken.
   export.
 - Clear Video and Clear Queue are available independently; new previews defer
   while an export owns the GPU.
-- Stability and grain preservation remain clearly labelled and disabled
-  instead of implying an active pipeline.
+- Grain preservation remains clearly labelled and disabled instead of implying
+  an active pipeline. Stability is now real — see below.
 - The slide-out dock is covered by an automated width/animation test.
+- Inverse telecine reverses 3:2 pulldown for film-sourced broadcast video, with
+  field detection reading pixels via `idet` rather than trusting container
+  metadata, which a remux silently drops.
+
+## Target content — read this before prioritising
+
+Audited 2026-08-07 against the real library. **There are no DVDs**; ~99% of use
+is downloaded rips:
+
+```text
+1440×1080 or 1920×1080 · H.265 Main 10 · yuv420p10le · progressive · 23.976
+```
+
+The SD/broadcast assumptions in earlier notes are wrong. IVTC and deinterlace
+are built and tested but are insurance, not the main path — they will rarely
+fire. See DECISIONS §1.
+
+**The pipeline currently decodes to 8-bit `rgb24`**, so 10-bit sources are
+quantised before the model sees them and encoded back at 8 bits. That is the
+largest quality gap for this material, and it shows as banding in gradients —
+space, nebulae, dim interiors.
+
+A 10-second real sample is at
+`F:\MiniMaxH3\outputs\2026-08-06\voyager-10s.mkv` (339 frames, 6 MB).
 
 ## Next product work
 
@@ -139,8 +163,13 @@ the wrong conclusion about whether it is broken.
    GPU tests need the ORT provider DLLs copied from `target/release/` into
    `target/release/deps/`, or they silently fall back to CPU and fail an
    unrelated assertion.
-2. **Source restoration** — deinterlace and deblock are active; IVTC and grain
-   separation/re-injection remain.
+2. **10-bit pipeline** — **highest value for the actual library.** Decode
+   `rgb48`, keep precision through the model (which already works in f32/f16),
+   encode 10-bit HEVC. Removes both the input quantisation and the 8-bit output
+   bottleneck.
+3. **Source restoration** — deinterlace, deblock and **inverse telecine** are
+   active and verified against ground truth. Grain separation and re-injection
+   remain, and matter more than expected for film-sourced Blu-rays.
 3. **Performance** — measured larger tiles and parallel post-processing landed;
    tile batching and optional TensorRT caching remain.
 4. **Broader model families** — SPAN, Compact, and RealPLKSR need their own

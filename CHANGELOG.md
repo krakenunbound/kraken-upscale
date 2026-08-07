@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased — inverse telecine, and a corrected picture of the target content
+
+### Inverse telecine
+
+Reversing 3:2 pulldown recovers the original 24 fps frames exactly; deinter-
+lacing the same footage destroys them. Measured against a known original:
+
+| treatment | result |
+|---|---|
+| inverse telecine | **PSNR infinite** — bit-exact recovery |
+| deinterlace | **38.9 dB** — permanent loss |
+
+That loss lands *before* the detail model, which then amplifies it.
+Deinterlacing telecined film also leaves the output at 29.97 fps where one
+frame in five is a blend, so a fifth of the upscaling budget goes on frames
+that never existed.
+
+The Source profile already encoded the distinction, so **TV — shot on film**
+now inverse-telecines and **TV — shot on video** deinterlaces. The rate change
+30 → 24 flows through the encoder rate, output frame count and progress total,
+keeping the exact rational (`24000/1001`, not 24) so audio does not drift
+across an episode.
+
+### Field detection reads pixels, not metadata
+
+A telecined MPEG-2 VOB flags itself `field_order=tt` correctly — but remux it
+to MKV and **the flag is gone while the combing remains**. Remuxes are what
+people actually have, and a test caught this immediately.
+
+The control is labelled "Detect field order & telecine", so it now runs `idet`
+and looks. Cached, so the decode pass is paid once. Requires a clear majority
+rather than a bare one, so occasional false positives on fast motion cannot
+trigger field processing on progressive film.
+
+### Test assets, built rather than sourced
+
+Producing DVD-era test footage was treated as blocked on owning a DVD. It was
+not: applying 3:2 pulldown to a known 24p source produces exactly the cadence a
+disc carries, and keeping the original frames gives ground truth a real rip
+cannot.
+
+- `assets/progressive24.mkv` — 12 frames of lossless FFV1 (0.89 MB). Tests
+  apply the telecine themselves so no encode sits in the comparison path.
+- A full NTSC DVD simulation was validated separately: 720×480, SAR 8:9,
+  DAR 4:3, top-field-first, MPEG-2 at disc bitrate. `idet` reports 59 TFF / 0
+  progressive; IVTC returns 23.976.
+
+### Target content corrected — this changes priorities
+
+The design assumed DVD-era SD as a primary source. **It is not.** The actual
+library is Blu-ray and web rips: 1080p or 1440×1080, H.265 **10-bit**,
+progressive, already at film cadence. There are no DVDs.
+
+Consequences:
+
+- **The broadcast front-end is insurance, not the main path.** IVTC and
+  deinterlace are correct and tested, and will almost never fire.
+- **10-bit is now the largest quality gap.** Decode is `rgb24` — 8-bit — so a
+  10-bit source is quantised before the model ever sees it. Banding shows up in
+  gradients: space, nebulae, dark interiors, which is most of this material.
+- **8-bit H.264 output is a second bottleneck**, for the same reason.
+- **Grain handling matters more than expected**, since film-sourced Blu-rays
+  carry real grain that the detail model will either eat or amplify.
+
 ## Unreleased — two "blocked" items were not actually blocked
 
 ### No-cut-ghosting verified on real footage
