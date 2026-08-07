@@ -32,6 +32,16 @@ target\release\kraken-upscale.exe "path\to\clip.mp4"
 A path argument is optional. The app also accepts window drag-and-drop and the
 Import button.
 
+The current easy-launch release is also staged at:
+
+```text
+F:\Video Upscale\Kraken Upscale.exe
+```
+
+It was verified from that exact path with the root `cuda/`, `models/`, provider
+DLLs, and bundled video tools. These generated payloads are intentionally
+ignored by Git and should be refreshed after a source rebuild.
+
 ## Completed reliability pass
 
 - Window close exits and requests active export cancellation.

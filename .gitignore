@@ -20,3 +20,8 @@
 /err.txt
 /rel-err.txt
 *.pdb
+
+# Easy-launch release copy and its beside-executable provider payload.
+/Kraken Upscale.exe
+/onnxruntime_providers_cuda.dll
+/onnxruntime_providers_shared.dll

@@ -82,6 +82,21 @@
 - Made the fixed export-format footer visibly non-interactive.
 - Changed unknown model scale display from `0×` to `auto`.
 
+### Root launch build
+
+- Built the optimized Windows executable and staged an easy-launch copy at
+  `F:\Video Upscale\Kraken Upscale.exe`.
+- Staged the CUDA provider DLLs and redistributable CUDA runtime beside the root
+  executable; the existing root `models/` and `vendor/ffmpeg/` folders complete
+  the local launch layout.
+- Launched that exact root copy with `SpaceVoyage_2.mp4` and verified CUDA model
+  loading, color-matched preview completion, model discovery, and a responsive
+  window.
+- Root executable SHA-256:
+  `5ACD0B75C04CAC587A4594F5810B954B093B96799E6E25B939B05F1535D1B306`.
+- Generated executable/runtime payloads remain outside Git; source, build
+  instructions, model provenance, and change records stay committed.
+
 ### Verification
 
 - Benchmarked automatic tile sizes on the target RTX 3090 using
