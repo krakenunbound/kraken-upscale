@@ -1558,9 +1558,11 @@ export component MainWindow inherits Window {
                                     }
 
                                     Help {
-                                        lines: 2;
-                                        text: "Applies on export. The preview shows a single "
-                                            + "frame, which has nothing to hold still.";
+                                        lines: 3;
+                                        text: "The preview renders the preceding frame too so "
+                                            + "this can be judged before exporting — scrub off "
+                                            + "the first frame to see it, at roughly double the "
+                                            + "preview time.";
                                         color: Pal.text-mute;
                                     }
                                 }

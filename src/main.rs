@@ -62,6 +62,12 @@ struct Job {
     interpolation_fps: Option<u32>,
     fp16: bool,
     tile: u32,
+    /// When set, the preview renders the preceding frame too and shows the
+    /// locked result, so Stability can actually be judged before committing to
+    /// an export.
+    stability: bool,
+    lock_strength: f32,
+    cut_detect: f32,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -307,6 +313,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 } else {
                     SAFE_TILE
                 },
+                stability: ui.get_stability_on(),
+                lock_strength: ui.get_lock(),
+                cut_detect: ui.get_cut_detect(),
             });
         }
     };
@@ -907,29 +916,88 @@ fn spawn_preview_worker(
                 });
             };
 
+            // Post-processing chain, shared by the current frame and — when the
+            // lock is being previewed — the preceding one.
+            let finish = |out: media::Frame, src: &media::Frame| -> media::Frame {
+                // Order matters: clamp structural error first, then mix toward
+                // the source, then resample to the requested scale. Resampling
+                // last means a 4x model asked for 2x gets its invented
+                // high-frequency detail averaged away.
+                let colored = if job.match_color {
+                    upscale::match_color_to_source(&out, src)
+                } else {
+                    out
+                };
+                let limited = upscale::clamp_deviation(&colored, src, job.detail_limit * 255.0);
+                let blended = upscale::blend_toward_source(&limited, src, job.strength);
+                upscale::resample(
+                    &blended,
+                    src.width * job.target_scale,
+                    src.height * job.target_scale,
+                )
+            };
+
             match up.run(&source, preview_tile, OVERLAP, &mut on_progress) {
                 Ok(out) => {
-                    // Order matters: clamp structural error first, then mix
-                    // toward the source, then resample to the requested scale.
-                    // Resampling last means a 4x model asked for 2x gets its
-                    // invented high-frequency detail averaged away.
-                    let colored = if job.match_color {
-                        upscale::match_color_to_source(&out, &source)
-                    } else {
-                        out
-                    };
-                    let limited =
-                        upscale::clamp_deviation(&colored, &source, job.detail_limit * 255.0);
-                    let blended = upscale::blend_toward_source(&limited, &source, job.strength);
-                    let final_frame = upscale::resample(
-                        &blended,
-                        source.width * job.target_scale,
-                        source.height * job.target_scale,
-                    );
+                    let mut final_frame = finish(out, &source);
+                    let mut lock_note = None;
+
+                    // Stability needs two frames to mean anything, so the
+                    // preview renders the preceding one as well. Without this
+                    // the Lock and Cut detect sliders can only be judged by
+                    // running a full export.
+                    if job.stability && job.at_secs > 0.0 {
+                        let step = 1.0 / job.clip.fps.max(1.0);
+                        let prev_at = (job.at_secs - step).max(0.0);
+                        match media::frame_at_with(
+                            &job.clip,
+                            prev_at,
+                            None,
+                            job.source_treatment,
+                        )
+                        .and_then(|prev_source| {
+                            let prev_out =
+                                up.run(&prev_source, preview_tile, OVERLAP, &mut |_, _| {})?;
+                            let prev_final = finish(prev_out, &prev_source);
+                            let motion = temporal::analyze_with(
+                                &prev_source,
+                                &source,
+                                job.cut_detect,
+                            )?;
+                            let scale =
+                                final_frame.width as f32 / source.width.max(1) as f32;
+                            Ok((
+                                temporal::lock(
+                                    &prev_final,
+                                    &final_frame,
+                                    &motion,
+                                    job.lock_strength,
+                                    scale,
+                                ),
+                                motion.mean_confidence(),
+                                motion.cut,
+                            ))
+                        }) {
+                            Ok((locked, confidence, cut)) => {
+                                final_frame = locked;
+                                lock_note = Some(if cut {
+                                    "lock released at cut".to_string()
+                                } else {
+                                    format!("lock {:.2} × held {confidence:.2}", job.lock_strength)
+                                });
+                            }
+                            Err(e) => {
+                                log(&handle, format!("preview lock skipped: {e}"));
+                            }
+                        }
+                    }
 
                     let secs = started.elapsed().as_secs_f32();
                     let mut notes = Vec::new();
                     if let Some(note) = interpolation_note {
+                        notes.push(note);
+                    }
+                    if let Some(note) = lock_note {
                         notes.push(note);
                     }
                     if job.match_color {
