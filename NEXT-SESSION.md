@@ -1,7 +1,9 @@
 # Start here next session
 
 Read [DECISIONS.md](DECISIONS.md) for architectural reasoning and
-[bugslist.md](bugslist.md) for the completed reliability audit.
+[bugslist.md](bugslist.md) for the completed reliability audit. Read
+[RIFE-IMPLEMENTATION.md](RIFE-IMPLEMENTATION.md) before changing interpolation,
+FPS scheduling, cut detection, or color matching.
 
 ## Current state
 

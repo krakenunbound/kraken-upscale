@@ -2,7 +2,9 @@
 
 Static code audit against the current tree, informed by [DECISIONS.md](DECISIONS.md) and [NEXT-SESSION.md](NEXT-SESSION.md).
 
-**Scope:** defects and misleading behaviour only. Planned temporal processing and source restoration stay in DECISIONS §13 unless they present as working UI that does nothing.
+**Scope:** defects and misleading behaviour only. Remaining planned work such as
+temporal detail locking, IVTC, and grain preservation stays in DECISIONS §13
+unless it presents as working UI that does nothing.
 
 **Reviewed and corrected.** Findings below were independently checked against
 the current Rust/Slint implementation and the earlier Grok design conversation.
@@ -38,6 +40,7 @@ Last updated: 2026-08-06
 - [x] B29 — every selectable Source Restore filter runs in the bundled video engine
 - [x] B30 — automatic tiles are capped safely for native 8x models
 - [x] B31 — Frame Interpolation runs a genuine RIFE model in preview and export
+- [x] B32 — Color Match affects RIFE and detail-model output in preview and export
 
 All confirmed defects in this audit are closed. Native folder-drop loading is
 also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
@@ -251,12 +254,33 @@ also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
 
 ### B31 — Frame Interpolation settings did not process frames
 - **Where:** `src/interpolate.rs`, `src/export.rs`, `src/main.rs`, `ui/app.slint`
-- **Resolution:** Added an unmodified drop-in RIFE timestep ONNX model and a
-  native CUDA inference stage. Preview renders a genuine between-frame sample;
-  export schedules exact phases for 48/60/120 fps, including non-integer
-  24→60 conversion, hard-cut protection, frame accounting, and color matching.
-- **Verification:** A real 24→60 export completed through RIFE, Color Match,
-  detail upscaling, and NVENC with the expected output rate and frame count.
+- **Resolution:** Added an unmodified, MIT-licensed drop-in RIFE timestep ONNX
+  model and a native CUDA inference stage. The model is discovered under
+  `models/interpolation/`; missing-model state is visible and cannot be queued.
+  Preview renders a genuine between-frame sample. Export schedules exact phases
+  for 48/60/120 fps, including non-integer 24→60 conversion, preserves duration,
+  accounts for final frames, protects hard cuts, and identifies interpolated
+  filenames and queue rows.
+- **Model record:** Revision, SHA-256, license, and installation path are pinned
+  in `models/interpolation/README.md` and explained in
+  `RIFE-IMPLEMENTATION.md`.
+- **Verification:** The real graph completed CUDA inference; a full-size
+  704×1248 pair completed RIFE plus color correction in 0.31 seconds; and a
+  real 24→60 streaming export completed through RIFE, Color Match, detail
+  upscaling, and NVENC with the expected output rate, frame count, and size.
+
+### B32 — Color controls persisted but did not process frames
+- **Where:** `src/upscale.rs`, `src/interpolate.rs`, `src/export.rs`,
+  `src/main.rs`, `src/settings.rs`, `ui/app.slint`
+- **What:** The original Color section presented `Match to source`, but its
+  value never entered preview or export.
+- **Resolution:** Added bounded per-channel mean/contrast correction and wired
+  the persisted switch into both pipelines. RIFE output is matched to the
+  corresponding source-pair color reference; detail-model output is matched to
+  its input frame. Hard-cut pairs skip the interpolation color reference.
+- **Verification:** The deterministic channel-drift test passes, the real RIFE
+  export test runs with Color Match enabled, and the live preview completion
+  log reports `color matched`.
 
 ---
 
@@ -296,6 +320,9 @@ These are intentional or documented unfinished work, not silent defects:
 2. Direct checkpoint import and inference pass with unchanged community models:
    2× RealESRGAN, 4× RealESRGAN, 4× UltraSharp, 4× Remacri, and 8× NMKD Faces.
 3. Release compilation succeeds after the complete fix set.
+4. The pinned RIFE graph completes native CUDA inference at full source size.
+5. The streaming interpolation regression produces a verified 60 fps output
+   with the expected frame count, dimensions, Color Match, and NVENC encode.
 
 ---
 

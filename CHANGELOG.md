@@ -25,7 +25,8 @@
 - Rounded output dimensions to valid even values for 4:2:0 encoding.
 - Added no-overwrite encoder behavior and unique queued output paths.
 - Prevented finished, running, or already-scheduled jobs from being queued twice.
-- Changed Export Current to Export Next so the label matches queue behavior.
+- Changed queue scheduling to select the next unfinished task; the final primary
+  button label is `Export`.
 - Added `-shortest` to keep remuxed audio/video duration bounded.
 
 ### Media correctness
@@ -41,6 +42,9 @@
   It synthesizes motion-aware frames before detail upscaling at 48, 60, or
   120 fps, skips interpolation across detected hard cuts, and color-matches
   generated frames to their source-frame blend when Color Match is enabled.
+- Added [RIFE-IMPLEMENTATION.md](RIFE-IMPLEMENTATION.md) with the permanent
+  model provenance, pipeline order, scheduling, logging, performance,
+  verification, and limitations record.
 - Probed both average and nominal frame rates and retained the selected rational
   rate throughout decode and encode.
 - Added explicit conversion to constant frame rate for the raw-frame pipeline.
