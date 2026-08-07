@@ -43,6 +43,13 @@ pub struct SourceTreatment {
 }
 
 impl SourceTreatment {
+    /// Builds the decode filter chain.
+    ///
+    /// Deinterlace is gated on the broadcast profiles because it is automatic —
+    /// the user asks for "TV, shot on video" and the correct handling follows.
+    /// Restore deliberately is *not* gated: it is an explicit selection, and
+    /// silently discarding it because of an unrelated dropdown would be worse
+    /// than applying it. The Source help states this split.
     fn filters(self, clip: &ClipInfo) -> Vec<String> {
         let mut filters = Vec::new();
         let broadcast_profile = matches!(self.content, 2 | 3);
@@ -247,6 +254,9 @@ pub struct Frame {
 ///
 /// `scale_to` drives the preview's "after" pane with a Lanczos baseline until
 /// model inference is wired in — which is the bar the model has to clear.
+/// Default-treatment convenience form. The application always supplies a
+/// treatment; this is what tests and measurement use.
+#[allow(dead_code)]
 pub fn frame_at(
     clip: &ClipInfo,
     at_secs: f64,

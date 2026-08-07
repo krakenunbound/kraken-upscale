@@ -1,20 +1,155 @@
 # Kraken Upscale — bug list
 
-Static code audit against the current tree, informed by [DECISIONS.md](DECISIONS.md) and [NEXT-SESSION.md](NEXT-SESSION.md).
+Static code audit against the current tree, informed by [DECISIONS.md](DECISIONS.md)
+and [NEXT-SESSION.md](NEXT-SESSION.md).
 
-**Scope:** defects and misleading behaviour only. Remaining planned work such as
-temporal detail locking, IVTC, and grain preservation stays in DECISIONS §13
-unless it presents as working UI that does nothing.
+**Scope:** defects and misleading behaviour only. Remaining planned product work
+such as IVTC and grain preservation stays in DECISIONS / NEXT-SESSION unless UI
+copy claims it is already active.
 
-**Reviewed and corrected.** Findings below were independently checked against
-the current Rust/Slint implementation and the earlier Grok design conversation.
-Implementation status is updated as fixes land.
+**Method:** full pass over `src/*.rs` and the export/preview control surface in
+`ui/app.slint`. No fixes applied in this pass — findings only.
 
-Last updated: 2026-08-06
+Last updated: 2026-08-07
 
 ---
 
-## Completion checklist
+## Open findings (2026-08-07 audit)
+
+### Critical / high
+
+### B33 — GPU-missing status is overwritten by `nvidia-smi` probe
+- **Where:** `src/main.rs` (startup after `cuda::prepare`)
+- **What:** When `cuda::prepare()` fails, the UI is set to `GPU RUNTIME MISSING`,
+  then immediately overwritten by `gpu::probe().runtime`, which reports
+  `RUNTIME OK` whenever `nvidia-smi` sees a device — even if the bundled CUDA /
+  cuDNN DLLs required by ONNX Runtime are absent.
+- **Impact:** Title/runtime pill can claim a healthy GPU path while preview and
+  export will refuse or fail once a session is built. Users get a false green
+  state at launch.
+- **Suggested fix:** Derive runtime state from `cuda_dir` (and later actual
+  provider registration), not from `nvidia-smi` alone. Keep device name from
+  smi; keep readiness from the ORT/CUDA payload check.
+
+### B34 — Temporal lock uses RIFE intermediates as motion source
+- **Where:** `src/export.rs` (`process_frame` + interpolation loop)
+- **What:** With Stability on, motion is estimated from the `source` argument
+  passed into `process_frame`. On the interpolation path that argument is often
+  a RIFE-synthesized frame (or alternates between real and synthetic frames),
+  not the original consecutive source pair.
+- **Impact:** Enabling Stability together with Frame Interpolation estimates
+  optical flow on invented intermediates. The lock can smear, ghost, or hold
+  the wrong detail precisely when both “video” features are active.
+- **Suggested fix:** Track the last *original* decoded pair for flow, run the
+  lock against that motion field, and only advance the lock’s source history on
+  real source frames (or warp lock state across interpolated output times).
+
+---
+
+### Medium
+
+### B35 — Content profile does not suppress Restore despite UI copy
+- **Where:** `src/media.rs` (`SourceTreatment::filters`); `ui/app.slint` (Source help)
+- **What:** UI help says AI-generated video “skips deinterlace, telecine and
+  deblock entirely.” Deinterlace is gated to content indices 2|3, but Restore
+  (`deblock` / `bilateral`) always runs for any profile. Telecine is never
+  applied for any profile. Content values 0, 1, and 4 are otherwise no-ops.
+- **Impact:** Choosing “AI generated video” (or Film / Modern digital) still
+  applies heavy deblock when Restore is non-None — opposite of the stated
+  contract. Easy to damage clean AI/film sources unintentionally.
+- **Suggested fix:** Gate Restore (and any future IVTC) on broadcast-era
+  profiles, or change the help text and make profile behaviour explicit per
+  option.
+
+### B36 — Seek and initial frame decode run on the UI thread
+- **Where:** `src/main.rs` (`on_seek`, `load_clip`)
+- **What:** `media::frame_at` / `frame_at_with` spawn ffmpeg and block until a
+  full rgb24 frame returns, all on the Slint event-loop thread. The model
+  preview correctly uses a worker; the before-frame path does not.
+- **Impact:** Scrubbing the playhead freezes the whole UI for the duration of
+  each decode (worse on long GOPs / slow disks). Opening a clip can hitch the
+  window before the first paint settles.
+- **Suggested fix:** Decode before-frames on the preview worker (or a small I/O
+  worker), generation-guard the results, and keep the UI thread free.
+
+### B37 — Preview deferred during export never restarts
+- **Where:** `src/main.rs` (`request` closure; `spawn_exporter`)
+- **What:** While `export_running` is true, `request()` bumps the preview
+  generation and returns without queueing a job. When the exporter finishes it
+  clears `export_running` but never re-invokes `request()`.
+- **Impact:** After any export, the after-pane can stay blank/stale until the
+  user wiggles a control or seeks. Loading a clip mid-export is especially
+  easy to leave without a preview.
+- **Suggested fix:** On export completion (success/cancel/fail), if a clip is
+  still loaded, kick `request()` once; optionally queue a single deferred job
+  instead of only bumping generation.
+
+### B38 — Interpolated frame count falls back wrong when duration is missing
+- **Where:** `src/export.rs` (`ExportSpec::output_frames`); `src/media.rs` (`probe`)
+- **What:** RIFE output length is `(duration * target_fps).round()` only when
+  `duration > 0`. If ffprobe reports no duration, the code falls back to
+  `clip.frames` (source frame count), not
+  `source_frames * target_fps / source_fps`.
+- **Impact:** Containers without a reliable duration (some MKV/TS/raw pipes)
+  export far too few frames at 48/60/120 fps, shortening the timeline and
+  desyncing copied audio via `-shortest`.
+- **Suggested fix:** When duration is unknown, derive output frames from
+  `nb_frames` and the source/target rate ratio; keep duration-based math when
+  duration is trusted.
+
+### B39 — Export child cleanup can be skipped if pipe hand-off fails
+- **Where:** `src/export.rs` (`run`, after both children spawn)
+- **What:** `decoder.stdout.take()` / `encoder.stdin.take()` use `?` before the
+  shared cleanup path. `Child` does not kill on drop, so a failed hand-off can
+  leave ffmpeg processes running and stderr drain threads orphaned. The encoder
+  spawn failure path does kill the decoder; this path does not.
+- **Impact:** Rare, but a stuck decoder/encoder after a partial setup error
+  burns CPU/GPU and can lock the output path.
+- **Suggested fix:** Use a single RAII/cleanup guard from the moment either
+  child exists; never `?` out without kill/wait/join.
+
+---
+
+### Low / polish
+
+### B40 — Model output tensor size is not checked against native scale
+- **Where:** `src/upscale.rs` (`run_tile` → `blend_into`)
+- **What:** Inference output is blended assuming
+  `len == 3 * (tile_w * scale) * (tile_h * scale)`. Wrong `models.json` scale,
+  a bad probe, or a non-ESRGAN graph can under/over-read the buffer.
+- **Impact:** Panic or silent corruption on mis-tagged drop-in models rather
+  than a clear load-time error.
+- **Suggested fix:** Validate output shape (or element count) after each
+  `run_tile` / after `probe_scale`, and error with the model name and sizes.
+
+### B41 — `.pth` loader reports CUDA from `is_available()`, not the session
+- **Where:** `src/pth.rs` (`load_rrdb`)
+- **What:** ONNX `.onnx` loading uses `error_on_failure` and an explicit CPU
+  fallback. The `.pth` path registers CUDA without `error_on_failure` and labels
+  the provider from `CUDA::is_available()` independently of what the session
+  actually got.
+- **Impact:** Edge installs can show/export as CUDA while ORT soft-failed to
+  CPU, or hard-fail `.pth` loads that `.onnx` would have recovered from.
+- **Suggested fix:** Mirror the `.onnx` provider policy: hard-require CUDA for
+  this product, or fall back and label from the real EP list.
+
+### B42 — Export progress total can disagree with frames actually written
+- **Where:** `src/export.rs` (`output_frames` vs decode loop); `src/main.rs`
+  (progress UI)
+- **What:** Non-interpolated exports progress against `clip.frames` derived at
+  probe time, while the decoder emits whatever the `fps=` filter produces.
+  Rounding and VFR→CFR conversion can yield `done > total` or a bar that never
+  reaches 100% before completion.
+- **Impact:** Misleading ETA/status only; final success still depends on
+  encoder exit, not the counter.
+- **Suggested fix:** Prefer “frames written” without a brittle total, or
+  recompute total after the first second of decode / from the fps filter policy.
+
+---
+
+## Completion checklist (prior audit — still closed)
+
+Earlier B1–B32 items remain closed in code. They are not re-opened by this pass.
 
 - [x] B1 — close exits and signals active export cancellation
 - [x] B2 / B9 / B25 — export cancellation, child cleanup, and partial-file removal
@@ -35,299 +170,70 @@ Last updated: 2026-08-06
 - [x] B23 — closed as a non-bug after review
 - [x] B24 — clean frame-boundary EOF and truncated-frame EOF are distinguished
 - [x] B26 — Explorer file drops use the native window event stream and show hover feedback
-- [x] B27 — missing GPU runtime no longer appears as an unexplained frozen preview
+- [x] B27 — missing GPU runtime no longer appears as an unexplained frozen preview *(launch pill still wrong — see B33)*
 - [x] B28 — current video and export queue can be cleared independently
 - [x] B29 — every selectable Source Restore filter runs in the bundled video engine
 - [x] B30 — automatic tiles are capped safely for native 8x models
 - [x] B31 — Frame Interpolation runs a genuine RIFE model in preview and export
 - [x] B32 — Color Match affects RIFE and detail-model output in preview and export
 
-All confirmed defects in this audit are closed. Native folder-drop loading is
-also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
+### Open checklist (this audit)
 
----
-
-## Critical / high
-
-### B1 — Window close does not quit the process
-- **Where:** `src/main.rs` (`on_close_requested` → `CloseRequestResponse::HideWindow`)
-- **What:** Closing the window hides it and leaves the event loop, preview worker, export worker, and GPU poller running. No tray or other quit path.
-- **Impact:** Zombie process until killed externally.
-- **Suggested fix:** Quit the event loop on close; signal background workers to stop.
-
-### B2 — Export cancel is dead infrastructure
-- **Where:** `src/export.rs` (`cancel` checks); `src/main.rs` (`spawn_exporter` creates `AtomicBool` never set true); `ui/app.slint` (no cancel control)
-- **What:** Cancel is plumbed into the export loop but never armed from the UI. Matches DECISIONS §13 (“Export cancel button — Missing”).
-- **Impact:** Long exports cannot be stopped from the app.
-- **Suggested fix:** Shared cancel flag, UI button, kill decoder/encoder children, remove or quarantine partial output.
-- **Audit note:** Factually correct, but this is documented unfinished functionality rather than a newly discovered regression. It remains high-priority because an export can run for hours.
-
-### B3 — Preview pan compounds every move event
-- **Where:** `ui/app.slint` (split view `sp` TouchArea; side-by-side `sbsa` TouchArea)
-- **What:**
-  ```slint
-  root.pan-x += self.mouse-x - self.pressed-x;
-  root.pan-y += self.mouse-y - self.pressed-y;
-  ```
-  `pressed-x/y` is the press origin, not the previous sample. Each `moved` event re-adds the full offset from press.
-- **Impact:** Panning overshoots badly (drag feels exponential / unusable).
-- **Suggested fix:** Store pan at pointer-down and set `pan = pan_at_press + (mouse - pressed)`, or accumulate deltas from last position.
-
-### B4 — Odd output dimensions break yuv420p / NVENC
-- **Where:** `src/export.rs` (`output_size`, encoder `-pix_fmt yuv420p`)
-- **What:** Output size is `width * scale` × `height * scale` with no even-rounding. Odd source × odd scale can yield odd dimensions.
-- **Impact:** Encode can fail on valid sources (e.g. some web resolutions ×3).
-- **Suggested fix:** Force even width/height (round or crop) before encoding.
-
-### B5 — Encoder stderr pipe can deadlock
-- **Where:** `src/export.rs` (`spawn_encoder`: `stderr(Stdio::piped())`, read only after `wait()` on failure)
-- **What:** If the encoder writes enough to fill the pipe, it blocks on write while the parent blocks on `wait`. Decoder correctly uses `stderr(Stdio::null())`.
-- **Impact:** Export hang under chatty/error-heavy encoder output. The block can occur while writing frames as well as while waiting for the child.
-- **Suggested fix:** Null stderr, or drain stderr on a side thread for the process lifetime.
-
-### B6 — Packaged models directory requires `models.json`
-- **Where:** `src/upscale.rs` (`models_dir`)
-- **What:** Models beside the executable are only used if `models/models.json` exists; otherwise falls back to `CARGO_MANIFEST_DIR`, which is absent in a shipped install.
-- **Impact:** Dropping only `.onnx` files next to a release binary fails discovery — contradicts DECISIONS §6 (“models/ is the source of truth”).
-- **Suggested fix:** Prefer `exe/models` if the directory exists or contains any `.onnx`; treat `models.json` as optional metadata only.
-
----
-
-## Medium
-
-### B7 — Export Current always runs queue index 0
-- **Where:** `src/main.rs` (`on_export_current` → `q.first()`)
-- **What:** There is no selected queue row. The button label implies the current clip/settings, but it always starts the first queued snapshot and re-runs it even if already done.
-- **Impact:** Wrong task exported; confusing UX for multi-item queues.
-
-### B8 — Batch export re-runs finished tasks
-- **Where:** `src/main.rs` (`on_batch_export`)
-- **What:** Sends the entire queue with no skip of `done` / already-running rows.
-- **Impact:** Accidental re-exports; wasted GPU time.
-
-### B9 — Cancel path leaves partial output (when cancel is wired)
-- **Where:** `src/export.rs` (`run` cancel branch)
-- **What:** On cancel, the encoder input is closed and the encoder is waited cleanly, but the unwanted partial file is not deleted or quarantined.
-- **Impact:** Partial `.mp4` left on disk; will matter once B2 is fixed.
-
-### B10 — FP16 UI claim contradicts measured behaviour
-- **Where:** `ui/app.slint` (Half precision CheckRow hint); DECISIONS §11a
-- **What:** UI says “Roughly 2x faster on your 3090.” DECISIONS records FP16 as slower in the only measurement, and notes those timings included session creation so the comparison is invalid.
-- **Impact:** Users enable FP16 expecting a speedup they may not get.
-
-### B11 — Hardware dropdown is fake
-- **Where:** `ui/app.slint` (Detail Model → FieldRow “Hardware”)
-- **What:** Hardcoded `["NVIDIA GeForce RTX 3090", "CPU (fallback)"]` with no binding to backend provider selection.
-- **Impact:** Looks like a real control; changing it does nothing.
-
-### B12 — Auto tile size checkbox is inert
-- **Where:** `ui/app.slint` (Detail Model); `src/main.rs` (`TILE = 256` constant)
-- **What:** `checked: true` with no property binding. Tile size is always 256/16. Matches DECISIONS §13.
-- **Impact:** Users believe VRAM-aware tiling is active.
-
-### B13 — Large sections of the rail are UI-only
-- **Where:** Source (content / restore / detect fields / preserve grain); Stability (lock / cut detect); Frame Interpolation; Color
-- **What:** Values persist in settings but never enter the preview or export pipeline. Documented as open work in DECISIONS §13, but were presented as interactive controls without clear planned/unavailable labels.
-- **Impact:** False confidence that preprocessing / temporal lock / RIFE are running.
-- **Resolution:** Source profiles, restoration, Color Match, and RIFE now enter
-  both preview and export. Stability and grain preservation remain visibly
-  labelled as planned and cannot be enabled.
-
-### B14 — Frame rate probe uses `r_frame_rate` only
-- **Where:** `src/media.rs` (`probe`)
-- **What:** Uses stream `r_frame_rate` for fps and for encoder `-r`. No `avg_frame_rate`; frame count falls back to `duration * fps`.
-- **Impact:** VFR or mis-tagged containers → wrong progress totals and possible A/V desync on encode. Reading `avg_frame_rate` alone is not a complete fix because the raw-frame pipe discards timestamps; the pipeline needs an explicit VFR-to-CFR policy or timestamp preservation.
-
-### B15 — No SAR / display-aspect handling
-- **Where:** `src/media.rs`, export sizing; designed in DECISIONS §7
-- **What:** Coded pixel dimensions only; no `sample_aspect_ratio` / `display_aspect_ratio`.
-- **Impact:** DVD / anamorphic sources export with squashed or stretched geometry if treated as square pixels.
-- **Priority note:** High for this product: old TV/DVD material is a primary target, and the raw RGB pipe otherwise discards display geometry.
-
-### B16 — ONNX I/O names hardcoded
-- **Where:** `src/upscale.rs` (`run_tile`: `"input"` / `"output"`)
-- **What:** Session run assumes those tensor names.
-- **Impact:** Otherwise-valid graphs with different names fail at inference.
-
----
-
-## Suspected (needs runtime confirmation)
-
-### B17 — Left dock panel may not expand
-- **Where:** `ui/app.slint` (dock `Rectangle` with animated `width` inside `HorizontalLayout`)
-- **What:** LOGS / SYSTEM tabs render; panel expansion was never confirmed (DECISIONS §10, NEXT-SESSION “First thing to check”). Suspicion: layout overrides animated `width`.
-- **Impact:** Dock appears broken if confirmed.
-- **Suggested check:** Click SYSTEM / LOGS; if width stuck, drive `min-width` / `max-width` instead of `width`.
-- **Audit note:** Not established statically. The explicit dynamic width is on a direct layout child and should be honored; keep this as runtime verification, not a confirmed defect.
-
----
-
-## Low / polish
-
-### B18 — Export Settings footer is non-functional
-- **Where:** `ui/app.slint` (sticky export footer `TouchArea`)
-- **What:** Gear + summary + chevron; click does nothing (no dialog, codec/CQ not user-editable).
-- **Impact:** Looks clickable; codec stays hardcoded `h264_nvenc` / CQ 19.
-
-### B19 — Add Task overwrites the same output path
-- **Where:** `src/main.rs` (`on_add_task` path: `{stem}_{scale}x_{model}.mp4`)
-- **What:** No uniqueness suffix; no overwrite warning. Strength / detail limit not in the name.
-- **Impact:** Silent overwrite of previous export for same model+scale.
-- **Priority note:** This is potential user data loss and should be treated as medium/high, not merely polish.
-
-### B20 — No guard against double-queued batch
-- **Where:** `src/main.rs` (export channel + queue)
-- **What:** Batch/Export Current can be sent again while the exporter is still working the same indices.
-- **Impact:** Duplicate work / confusing task row state.
-
-### B21 — Drop-in models show `(0x)` until first load
-- **Where:** `src/main.rs` (model name list); `src/upscale.rs` (`scale: 0` means probe on load)
-- **What:** UI displays native scale before probe and never updates the registry label afterward, so an unlisted model stays `(0x)` for the entire session.
-- **Impact:** Cosmetic confusion only.
-
-### B22 — CUDA discovery hardcodes machine-specific paths
-- **Where:** `src/cuda.rs` (`candidates`: fixed PyTorch venv paths under `F:\` / `E:\`)
-- **What:** Fine for this development machine; wrong for any other install.
-- **Resolution:** Removed. Discovery now uses only the beside-app runtime folder,
-  the explicit app override, or a standard system toolkit location.
-
-### B23 — Dock / view-mode only saved on close
-- **Where:** `src/main.rs` (close handler); settings-changed intentionally skips dock/view
-- **What:** Normal close saves these fields before returning `HideWindow`; B1 does not make persistence worse. Only a crash loses changes made since launch.
-- **Audit verdict:** Not a meaningful bug. Saving these lightweight fields immediately would be nicer, but save-on-close is internally consistent.
-
----
-
-## Additional verified findings
-
-### B24 — Truncated decoder output can be reported as success
-- **Where:** `src/export.rs` (`read_exact` handling)
-- **What:** `read_exact` returns `UnexpectedEof` both for a clean zero-byte EOF at a frame boundary and for EOF after part of a frame. The loop treats both as normal completion despite the comment claiming it distinguishes them.
-- **Impact:** A decoder failure can produce a shortened video that the app marks done.
-- **Suggested fix:** Count bytes while filling each frame and treat EOF as clean only when zero bytes were read for the next frame.
-
-### B25 — Export error paths do not guarantee child-process cleanup
-- **Where:** `src/export.rs` (all `?` exits after decoder/encoder spawn)
-- **What:** Inference, resample, or encoder-write errors can return before both ffmpeg children are explicitly killed/waited and before partial output is removed.
-- **Impact:** Stray ffmpeg work, incomplete files, and loss of the useful encoder error.
-- **Suggested fix:** Central cleanup/RAII guard covering decoder, encoder, stderr draining, and partial-file policy on every exit path.
-
-### B26 — Drop target text is shown but Explorer drops are ignored
-- **Where:** `src/dnd.rs`, `src/main.rs`, `ui/app.slint`
-- **What:** The app installed a legacy `WM_DROPFILES` window-procedure hook while
-  the window framework had already registered the modern OLE drop target.
-  Explorer delivered the file through the framework, so the legacy hook never
-  received it.
-- **Resolution:** Listen to the framework's native `DroppedFile`, `HoveredFile`,
-  and cancellation events. The empty stage now highlights while a valid file is
-  over the window and clears that state on drop or cancellation.
-
-### B27 — CPU fallback looks frozen and the activity log gives no progress
-- **Where:** `src/main.rs` preview worker and runtime status
-- **What:** A full-resolution RRDBNet preview could silently begin on the CPU
-  when the packaged GPU runtime was absent. The status stayed `RUNTIME OK`, and
-  the log stopped after model load while a very long render ran.
-- **Resolution:** Missing GPU support is now a visible blocking state; automatic
-  preview stops rather than starting impractical CPU work. GPU previews log
-  dimensions, model loading, tile progress with elapsed time/ETA, completion,
-  and failures. The same entries persist to `activity.log` across restarts.
-
-### B28 — No way to clear the current video or export queue
-- **Where:** `ui/app.slint`, `src/main.rs`
-- **Resolution:** Added independent Clear Video and Clear Queue actions. Queue
-  clearing requests cancellation when necessary; late preview results are
-  generation-guarded so clearing/replacing a video cannot repaint stale output.
-
-### B29 — Heavy-compression Restore generated an invalid filter chain
-- **Where:** `src/media.rs`
-- **What:** The strongest Restore choice used a denoiser absent from the bundled
-  video engine, so selecting it failed before the preview could be decoded.
-- **Resolution:** Replaced it with the bundled threaded bilateral denoiser,
-  logged full source-processing failures to `activity.log`, and executed all
-  four Restore values in the media test and against `SpaceVoyage_2.mp4`.
-
-### B30 — Larger automatic tiles overflow native 8x CUDA graphs
-- **Where:** `src/upscale.rs`, `src/main.rs`
-- **Resolution:** Cap a tile by native model scale so its model output stays at
-  or below 4096px. The RTX 3090 retains the measured 896px tile for 2x/4x
-  models, while an 8x model is safely capped at 512px.
-
-### B31 — Frame Interpolation settings did not process frames
-- **Where:** `src/interpolate.rs`, `src/export.rs`, `src/main.rs`, `ui/app.slint`
-- **Resolution:** Added an unmodified, MIT-licensed drop-in RIFE timestep ONNX
-  model and a native CUDA inference stage. The model is discovered under
-  `models/interpolation/`; missing-model state is visible and cannot be queued.
-  Preview renders a genuine between-frame sample. Export schedules exact phases
-  for 48/60/120 fps, including non-integer 24→60 conversion, preserves duration,
-  accounts for final frames, protects hard cuts, and identifies interpolated
-  filenames and queue rows.
-- **Model record:** Revision, SHA-256, license, and installation path are pinned
-  in `models/interpolation/README.md` and explained in
-  `RIFE-IMPLEMENTATION.md`.
-- **Verification:** The real graph completed CUDA inference; a full-size
-  704×1248 pair completed RIFE plus color correction in 0.31 seconds; and a
-  real 24→60 streaming export completed through RIFE, Color Match, detail
-  upscaling, and NVENC with the expected output rate, frame count, and size.
-
-### B32 — Color controls persisted but did not process frames
-- **Where:** `src/upscale.rs`, `src/interpolate.rs`, `src/export.rs`,
-  `src/main.rs`, `src/settings.rs`, `ui/app.slint`
-- **What:** The original Color section presented `Match to source`, but its
-  value never entered preview or export.
-- **Resolution:** Added bounded per-channel mean/contrast correction and wired
-  the persisted switch into both pipelines. RIFE output is matched to the
-  corresponding source-pair color reference; detail-model output is matched to
-  its input frame. Hard-cut pairs skip the interpolation color reference.
-- **Verification:** The deterministic channel-drift test passes, the real RIFE
-  export test runs with Color Match enabled, and the live preview completion
-  log reports `color matched`.
+- [ ] B33 — runtime pill trusts `nvidia-smi` over CUDA payload discovery
+- [ ] B34 — Stability + RIFE motion source is wrong
+- [ ] B35 — Content profile vs Restore gating / help text
+- [ ] B36 — UI-thread ffmpeg on seek/open
+- [ ] B37 — preview not resumed after export
+- [ ] B38 — RIFE frame count when duration is missing
+- [ ] B39 — export pipe hand-off cleanup
+- [ ] B40 — model output shape validation
+- [ ] B41 — `.pth` provider labelling / fallback parity
+- [ ] B42 — export progress total vs actual frames
 
 ---
 
 ## Not bugs (known open work / by design)
 
-These are intentional or documented unfinished work, not silent defects:
-
 | Item | Notes |
 |------|--------|
-| Native `.pth` importer | Completed: direct ZIP and legacy checkpoint loading; 2×/4×/8× verified |
-| Temporal lock / Stability pipeline | Designed; not implemented |
-| Source preprocessing | Deinterlace/deblock/compression cleanup active; IVTC and grain remain |
+| Preserve grain control | Explicitly labelled planned and `enabled: false` |
+| IVTC / telecine | Designed; not implemented — do not treat as a silent defect unless UI claims it runs |
+| Export codec/CQ UI | Footer is labelled fixed / LOCKED; values stay `h264_nvenc` / CQ 19 |
 | Scale by target format (HD/4K) | Designed in DECISIONS §7 |
-| Performance (tile size, batching, TensorRT, model-scale match) | Known; not correctness bugs |
+| SPAN / Compact / RealPLKSR `.pth` | RRDBNet only; unsupported topologies should error |
 | LGPL ffmpeg → NVENC only, no libx264 | By design |
-| AV1 NVENC fails on Ampere (3090) | Hardware limit, documented |
+| AV1 NVENC on Ampere (3090) | Hardware limit, documented |
+| Preview omits temporal lock | Intentional single-frame preview; export-only is disclosed in the Stability help |
+
+**Doc drift note:** [NEXT-SESSION.md](NEXT-SESSION.md) still describes Stability as
+disabled/planned in places, but the current code enables Stability by default
+and runs `temporal::lock` on export. Treat the code as source of truth; refresh
+session notes when convenient. That drift is not filed as a product bug.
 
 ---
 
 ## Already in good shape (for regression awareness)
 
-- End-to-end export validated (decode → model → encode → audio remux) on SpaceVoyage
-- Model preference ranking (Remacri default, not alphabetical AnimeSharp)
-- Scale applies via resample-last (native model scale → target)
+- End-to-end export path: decode → optional RIFE → model → post → encode → audio map
+- Cancel flag armed from UI / clear-queue / window close; partial outputs removed
+- Unique output paths + ffmpeg `-n`
+- Model preference ranking (Remacri default)
+- Scale via resample-last after native model scale
 - Settings persist model **by name**
 - GPU telemetry polled off the UI thread
-- Preview worker coalesces to newest job
-- SectionHeader TouchArea declared under siblings (known Slint click-swallow trap fixed)
-- Before/after divider tracks displayed image box, not the pane
-
----
-
-## Verification record
-
-1. Full Rust test suite passes, including exact/truncated frame reads, odd-size
-   export sizing, anamorphic media normalization, and animated dock width.
-2. Direct checkpoint import and inference pass with unchanged community models:
-   2× RealESRGAN, 4× RealESRGAN, 4× UltraSharp, 4× Remacri, and 8× NMKD Faces.
-3. Release compilation succeeds after the complete fix set.
-4. The pinned RIFE graph completes native CUDA inference at full source size.
-5. The streaming interpolation regression produces a verified 60 fps output
-   with the expected frame count, dimensions, Color Match, and NVENC encode.
+- Preview worker coalesces to newest job and generation-guards results
+- SAR normalization and even geometry for yuv420p/NVENC
+- SectionHeader TouchArea stacking (click-swallow trap fixed)
+- Before/after divider tracks displayed image box
 
 ---
 
 ## Audit notes
 
-- Method: static review plus targeted automated and real-model runtime tests. Dock expansion (B17) is runtime-verified.
-- Shared Grok conversation was reviewed for architectural context; bug verdicts are based on the current repository.
-- Do **not** treat this list as a substitute for DECISIONS open work; link both when prioritising.
+- Method: static review of the current Rust/Slint tree only; no new runtime
+  repro on GPU was required for the open items above (each has a direct code
+  path demonstrating the fault).
+- Do **not** treat this list as a substitute for DECISIONS open work; link both
+  when prioritising.
+- Priority suggestion if fixing later: **B33**, **B34**, **B36**, **B38**, then
+  **B35** / **B37**.

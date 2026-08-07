@@ -122,6 +122,8 @@ export component MainWindow inherits Window {
     callback clear-queue();
     callback seek(float);
     callback settings-changed();
+    /// Re-runs the preview once an export releases the GPU.
+    callback resume-preview();
     callback reset-view();
     callback reveal(string);
     callback add-task();
@@ -1324,10 +1326,11 @@ export component MainWindow inherits Window {
                                     }
 
                                     Help {
-                                        lines: 2;
-                                        text: "Sets the front-end. AI video skips deinterlace, "
-                                            + "telecine and deblock entirely — those stages only "
-                                            + "help broadcast-era sources.";
+                                        lines: 3;
+                                        text: "Gates the automatic front-end: deinterlace runs "
+                                            + "only on the TV profiles, and only when the source "
+                                            + "really is interlaced. Restore below is a manual "
+                                            + "choice and applies to every profile.";
                                     }
 
                                     // Raised by the probe when the source has

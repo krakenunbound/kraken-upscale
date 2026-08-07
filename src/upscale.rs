@@ -386,6 +386,21 @@ impl Upscaler {
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("reading output tensor: {e}"))?;
 
+        // A mis-tagged models.json entry, a bad scale probe, or a graph that
+        // is not an ESRGAN-family upscaler would otherwise be blended with the
+        // wrong stride — reading past the buffer or silently corrupting the
+        // tile. Fail with the numbers instead.
+        let expected = 3 * (tw as usize) * (th as usize) * (self.scale as usize).pow(2);
+        if data.len() != expected {
+            let ratio = (data.len() as f64 / (3.0 * tw as f64 * th as f64)).sqrt();
+            return Err(format!(
+                "model output does not match its {}x scale: got {} values for a {tw}x{th} tile, \
+                 expected {expected} (output implies about {ratio:.2}x)",
+                self.scale,
+                data.len()
+            ));
+        }
+
         Ok(data.to_vec())
     }
 }

@@ -89,6 +89,14 @@ impl ExportSpec {
             Some(fps) if self.clip.duration > 0.0 => {
                 (self.clip.duration * fps as f64).round().max(1.0) as u64
             }
+            // No trusted duration — some MKV/TS containers and raw pipes report
+            // none. Scale the source frame count by the rate ratio instead;
+            // falling back to the source count would export far too few frames
+            // and `-shortest` would then truncate the copied audio to match.
+            Some(fps) if self.clip.fps > 0.0 => {
+                let ratio = fps as f64 / self.clip.fps;
+                ((self.clip.frames.max(1) as f64) * ratio).round().max(1.0) as u64
+            }
             _ => self.clip.frames.max(1),
         }
     }
@@ -228,17 +236,51 @@ pub fn run(
     };
     let mut encoder_err = encoder.stderr.take().map(drain);
 
-    let mut src_out = decoder
-        .stdout
-        .take()
-        .ok_or_else(|| "decoder produced no output pipe".to_string())?;
-    let mut enc_in = BufWriter::with_capacity(
-        1 << 22,
-        encoder
-            .stdin
-            .take()
-            .ok_or_else(|| "encoder accepted no input pipe".to_string())?,
-    );
+    // Both children exist from here on, and `Child` does not kill on drop, so
+    // no path may return without tearing them down or ffmpeg is left running.
+    let teardown = |decoder: &mut Child,
+                        encoder: &mut Child,
+                        decoder_err: &mut Option<JoinHandle<String>>,
+                        encoder_err: &mut Option<JoinHandle<String>>| {
+        let _ = decoder.kill();
+        let _ = encoder.kill();
+        let _ = decoder.wait();
+        let _ = encoder.wait();
+        if let Some(t) = decoder_err.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = encoder_err.take() {
+            let _ = t.join();
+        }
+    };
+
+    let mut src_out = match decoder.stdout.take() {
+        Some(pipe) => pipe,
+        None => {
+            teardown(
+                &mut decoder,
+                &mut encoder,
+                &mut decoder_err,
+                &mut encoder_err,
+            );
+            remove_partial(&spec.out_path);
+            return Err("decoder produced no output pipe".into());
+        }
+    };
+    let enc_stdin = match encoder.stdin.take() {
+        Some(pipe) => pipe,
+        None => {
+            teardown(
+                &mut decoder,
+                &mut encoder,
+                &mut decoder_err,
+                &mut encoder_err,
+            );
+            remove_partial(&spec.out_path);
+            return Err("encoder accepted no input pipe".into());
+        }
+    };
+    let mut enc_in = BufWriter::with_capacity(1 << 22, enc_stdin);
 
     let mut buf = vec![0u8; frame_bytes];
     let mut done = 0u64;
@@ -273,6 +315,15 @@ pub fn run(
             // The lock runs last, on the finished frame, so what gets held is
             // exactly what was written — locking before post-processing would
             // carry forward detail that later stages then alter.
+            //
+            // `source` here is the *rendered* frame, which on the interpolation
+            // path is often a RIFE intermediate rather than a decoded one. That
+            // is deliberate and correct: output N came from rendered frame N, so
+            // the motion between consecutive outputs is the motion between
+            // consecutive rendered frames. Substituting the original decoded
+            // pair would be wrong, because interpolated outputs sit at
+            // intermediate times and would be warped by too much motion.
+            // Covered by `lock_with_interpolation_does_not_regress`.
             if spec.stability {
                 if let Some((prev_source, prev_output)) = previous.as_ref() {
                     final_frame = stages.lock(|| -> Result<Frame, String> {
@@ -684,6 +735,107 @@ mod tests {
         assert!(
             locked < unlocked,
             "lock must not increase flicker: {unlocked:.3} -> {locked:.3}"
+        );
+    }
+
+    /// B34: does running Stability together with Frame Interpolation smear or
+    /// ghost, because flow is estimated on RIFE intermediates?
+    ///
+    /// It should not. Output N is produced from rendered frame N whether that
+    /// frame was decoded or synthesized, so flow between consecutive rendered
+    /// frames is the motion between consecutive outputs. This asserts the
+    /// combination does not increase flicker over interpolation alone.
+    ///
+    /// `cargo test --release lock_with_interpolation -- --ignored --nocapture`
+    #[test]
+    #[ignore = "set KRAKEN_TEST_CLIP to check Stability combined with RIFE"]
+    fn lock_with_interpolation_does_not_regress() {
+        let _ = crate::cuda::prepare();
+        let source = std::env::var_os("KRAKEN_TEST_CLIP")
+            .map(PathBuf::from)
+            .expect("KRAKEN_TEST_CLIP is required");
+        let temp = std::env::temp_dir();
+        let pid = std::process::id();
+        let input = temp.join(format!("kraken-b34-in-{pid}.mkv"));
+
+        let status = quiet(&mut Command::new(media::ffmpeg()))
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&source)
+            .args(["-t", "0.3", "-an", "-c:v", "ffv1"])
+            .arg(&input)
+            .status()
+            .expect("create B34 test clip");
+        assert!(status.success());
+
+        let clip = media::probe(&input).expect("probe clip");
+        let model = upscale::registry()
+            .into_iter()
+            .find(|entry| entry.name == "RealESRGAN_x2")
+            .expect("find RealESRGAN_x2");
+
+        let measure = |path: &std::path::Path| -> f32 {
+            let out = media::probe(path).expect("probe export");
+            let step = 1.0 / out.fps.max(1.0);
+            let mut total = 0.0;
+            let mut n = 0;
+            for i in 0..(out.frames.min(20).saturating_sub(1)) {
+                let a = media::frame_at(&out, i as f64 * step, None).expect("a");
+                let b = media::frame_at(&out, (i + 1) as f64 * step, None).expect("b");
+                total += crate::temporal::mean_abs_diff(&a, &b);
+                n += 1;
+            }
+            total / n.max(1) as f32
+        };
+
+        let run_one = |stability: bool, tag: &str| -> f32 {
+            let out_path = temp.join(format!("kraken-b34-{tag}-{pid}.mp4"));
+            let _ = std::fs::remove_file(&out_path);
+            let mut up = Upscaler::load(&model, true).expect("load model");
+            let mut rife = Rife::load().expect("load RIFE");
+            let spec = ExportSpec {
+                clip: clip.clone(),
+                model: model.clone(),
+                target_scale: 2,
+                strength: 1.0,
+                detail_limit: 1.0,
+                source_treatment: media::SourceTreatment::default(),
+                match_color: true,
+                stability,
+                lock_strength: 0.75,
+                cut_detect: 0.4,
+                interpolation_fps: Some(60),
+                fp16: true,
+                tile: crate::recommended_tile(),
+                out_path: out_path.clone(),
+                codec: "h264_nvenc".into(),
+                cq: 19,
+            };
+            run(
+                &spec,
+                &mut up,
+                Some(&mut rife),
+                spec.tile,
+                16,
+                Arc::new(AtomicBool::new(false)),
+                &mut |_, _| {},
+            )
+            .expect("export");
+            let flicker = measure(&out_path);
+            let _ = std::fs::remove_file(&out_path);
+            flicker
+        };
+
+        let interp_only = run_one(false, "interp");
+        let interp_locked = run_one(true, "interp-locked");
+        println!(
+            "\nRIFE alone {interp_only:.3} · RIFE + lock {interp_locked:.3} ({:+.1}%)\n",
+            (1.0 - interp_locked / interp_only.max(1e-6)) * 100.0
+        );
+
+        let _ = std::fs::remove_file(input);
+        assert!(
+            interp_locked <= interp_only * 1.02,
+            "lock made interpolated output worse: {interp_only:.3} -> {interp_locked:.3}"
         );
     }
 

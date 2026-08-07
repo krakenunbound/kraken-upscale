@@ -79,19 +79,28 @@ fn main() -> Result<(), slint::PlatformError> {
     let logger = ui.as_weak();
     match cuda_dir.as_deref() {
         Some(dir) => log(&logger, format!("CUDA runtime: {}", dir.display())),
-        None => {
-            ui.set_runtime_state("GPU RUNTIME MISSING".into());
-            log(
-                &logger,
-                "GPU runtime missing — preview and export are paused to avoid unusably slow CPU processing",
-            );
-        }
+        None => log(
+            &logger,
+            "GPU runtime missing — preview and export are paused to avoid unusably slow CPU processing",
+        ),
     }
 
     let probe = gpu::probe();
     let auto_tile_size = recommended_tile();
     ui.set_gpu_name(probe.name.clone().into());
-    ui.set_runtime_state(probe.runtime.into());
+
+    // Readiness is decided by the CUDA payload, not by nvidia-smi. The driver
+    // can happily report a device while ONNX Runtime still has no provider it
+    // can load, and reporting RUNTIME OK there gives a false green light that
+    // only fails once a session is built.
+    ui.set_runtime_state(
+        match (cuda_dir.is_some(), probe.device_present) {
+            (true, true) => "RUNTIME OK",
+            (false, true) => "GPU RUNTIME MISSING",
+            (_, false) => "NO CUDA DEVICE",
+        }
+        .into(),
+    );
     log(&logger, format!("GPU: {}", probe.name));
     log(&logger, format!("automatic tile size: {auto_tile_size}px"));
 
@@ -204,6 +213,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let preview_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let tx = spawn_preview_worker(ui.as_weak(), preview_generation.clone());
 
+    // Source frames decode off the event loop too, or scrubbing freezes the UI.
+    let before_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let before_tx = spawn_before_worker(ui.as_weak(), before_generation.clone());
+
     // Kick a preview render from whatever the controls currently say.
     let request = {
         let handle = ui.as_weak();
@@ -297,6 +310,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let handle = ui.as_weak();
         let clip = clip.clone();
         let request = request.clone();
+        let before_tx = before_tx.clone();
+        let before_generation = before_generation.clone();
         move |path: std::path::PathBuf| {
             let Some(ui) = handle.upgrade() else { return };
             match media::probe(&path) {
@@ -316,6 +331,18 @@ fn main() -> Result<(), slint::PlatformError> {
                         ),
                     );
                     load_clip(&ui, &info);
+                    let generation = before_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = before_tx.send(BeforeJob {
+                        generation,
+                        clip: info.clone(),
+                        at_secs: 0.0,
+                        treatment: media::SourceTreatment {
+                            content: ui.get_content_index(),
+                            restore: ui.get_restore_index(),
+                            deinterlace: ui.get_detect_fields(),
+                        },
+                        thumbnail: true,
+                    });
                     *clip.borrow_mut() = Some(info);
                     request();
                 }
@@ -347,23 +374,25 @@ fn main() -> Result<(), slint::PlatformError> {
         let handle = ui.as_weak();
         let clip = clip.clone();
         let request = request.clone();
+        let before_tx = before_tx.clone();
+        let before_generation = before_generation.clone();
         ui.on_seek(move |pos| {
             let ui = handle.unwrap();
             if let Some(info) = clip.borrow().as_ref() {
-                // Show the source frame immediately; the model result follows.
-                let treatment = media::SourceTreatment {
-                    content: ui.get_content_index(),
-                    restore: ui.get_restore_index(),
-                    deinterlace: ui.get_detect_fields(),
-                };
-                if let Ok(f) = media::frame_at_with(
-                    info,
-                    pos.clamp(0.0, 1.0) as f64 * info.duration,
-                    None,
-                    treatment,
-                ) {
-                    ui.set_frame_before(to_image(&f));
-                }
+                // Queued, not decoded here: this runs on the event loop and a
+                // blocking ffmpeg call would freeze the window every scrub step.
+                let generation = before_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = before_tx.send(BeforeJob {
+                    generation,
+                    clip: info.clone(),
+                    at_secs: pos.clamp(0.0, 1.0) as f64 * info.duration,
+                    treatment: media::SourceTreatment {
+                        content: ui.get_content_index(),
+                        restore: ui.get_restore_index(),
+                        deinterlace: ui.get_detect_fields(),
+                    },
+                    thumbnail: false,
+                });
             }
             request();
         });
@@ -381,6 +410,11 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             request();
         });
+    }
+
+    {
+        let request = request.clone();
+        ui.on_resume_preview(move || request());
     }
 
     ui.on_reveal(|path| reveal(&path));
@@ -1114,7 +1148,14 @@ fn spawn_exporter(
                     // enough here for that to be trustworthy after a frame or
                     // two — the first frame is skipped because it carries
                     // session creation and cuDNN autotuning.
-                    let label = if done >= 2 && done < total {
+                    // `total` is an estimate from probe metadata, while `done`
+                    // counts frames the decoder actually produced. VFR sources
+                    // and CFR conversion can push done past total, so once that
+                    // happens stop quoting a total or an ETA rather than
+                    // showing "134/120" and a bar stuck at 100%.
+                    let label = if done > total {
+                        format!("{done} frames")
+                    } else if done >= 2 {
                         let per = started.elapsed().as_secs_f64() / done as f64;
                         format!(
                             "{done}/{total} · {} left",
@@ -1187,6 +1228,72 @@ fn spawn_exporter(
                 *slot = None;
             }
             set_export_running(&handle, false);
+        }
+    });
+
+    tx
+}
+
+/// A source-frame decode request for the before-pane.
+struct BeforeJob {
+    generation: u64,
+    clip: media::ClipInfo,
+    at_secs: f64,
+    treatment: media::SourceTreatment,
+    /// Also populate the video-info thumbnail, which only the initial load
+    /// needs.
+    thumbnail: bool,
+}
+
+/// Decodes before-pane frames off the UI thread.
+///
+/// `media::frame_at` spawns ffmpeg and blocks until a full rgb24 frame comes
+/// back. Doing that on the Slint event loop froze the whole window for the
+/// duration of every scrub step, which is very visible on long GOPs or a slow
+/// disk. The model preview already used a worker; this gives the source frame
+/// the same treatment.
+fn spawn_before_worker(
+    handle: slint::Weak<MainWindow>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+) -> Sender<BeforeJob> {
+    let (tx, rx) = channel::<BeforeJob>();
+
+    std::thread::spawn(move || {
+        while let Ok(job) = rx.recv() {
+            // Scrubbing queues faster than ffmpeg can serve; only the newest
+            // position is worth decoding.
+            let job = std::iter::successors(Some(job), |_| rx.try_recv().ok())
+                .last()
+                .unwrap();
+            if job.generation < generation.load(Ordering::Relaxed) {
+                continue;
+            }
+
+            let decoded =
+                media::frame_at_with(&job.clip, job.at_secs, None, job.treatment);
+            let Ok(frame) = decoded else { continue };
+
+            let h = handle.clone();
+            let wanted = job.generation;
+            let gen = generation.clone();
+            let thumbnail = job.thumbnail;
+            let posted = slint::invoke_from_event_loop(move || {
+                // Re-check on the UI thread: the clip may have changed while
+                // this frame was in flight.
+                if wanted < gen.load(Ordering::Relaxed) {
+                    return;
+                }
+                let Some(ui) = h.upgrade() else { return };
+                let image = to_image(&frame);
+                ui.set_frame_before(image.clone());
+                if thumbnail {
+                    ui.set_frame_after(image.clone());
+                    ui.set_thumb(image);
+                }
+            });
+            if posted.is_err() {
+                return;
+            }
         }
     });
 
@@ -1358,6 +1465,12 @@ fn set_export_running(handle: &slint::Weak<MainWindow>, running: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = handle.upgrade() {
             ui.set_export_running(running);
+            // Requests made during an export only bump the generation and
+            // return, so without this the after-pane stays blank or stale
+            // until the user happens to touch a control.
+            if !running {
+                ui.invoke_resume_preview();
+            }
         }
     });
 }
@@ -1466,13 +1579,8 @@ fn load_clip(ui: &MainWindow, info: &media::ClipInfo) {
     ui.set_pan_x(0.0);
     ui.set_pan_y(0.0);
     ui.set_has_clip(true);
-
-    if let Ok(f) = media::frame_at(info, 0.0, None) {
-        let img = to_image(&f);
-        ui.set_frame_before(img.clone());
-        ui.set_frame_after(img.clone());
-        ui.set_thumb(img);
-    }
+    // The first frame is decoded on the before-worker by the caller, so opening
+    // a clip does not hitch the window before its first paint.
 }
 
 #[cfg(test)]

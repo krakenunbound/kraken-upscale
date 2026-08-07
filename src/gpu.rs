@@ -14,7 +14,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct Probe {
     pub name: String,
-    pub runtime: String,
+    /// Whether the driver reports a device at all. Says nothing about whether
+    /// ONNX Runtime can use it — that depends on the CUDA payload, and the
+    /// caller decides readiness from both.
+    pub device_present: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -58,11 +61,11 @@ pub fn probe() -> Probe {
     match stats() {
         Some(s) => Probe {
             name: format!("{}  ·  {:.0} GB", short_name(&s.device), s.vram_total_gb()),
-            runtime: "RUNTIME OK".into(),
+            device_present: true,
         },
         None => Probe {
             name: "NO CUDA DEVICE".into(),
-            runtime: "CPU FALLBACK".into(),
+            device_present: false,
         },
     }
 }

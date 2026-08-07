@@ -9,7 +9,7 @@ use std::path::Path;
 
 use candle_core::{DType, Device, Tensor as CandleTensor};
 use ort::editor::{Graph, Model, Node, Opset, ONNX_DOMAIN};
-use ort::ep::{ExecutionProvider, CUDA};
+use ort::ep::{ExecutionProviderDispatch, CPU, CUDA};
 use ort::memory::Allocator;
 use ort::operator::Attribute;
 use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -118,21 +118,33 @@ pub fn load_rrdb(path: &Path) -> Result<(Session, u32, String), String> {
         .map_err(err("creating model"))?;
     model.add_graph(graph).map_err(err("adding graph"))?;
 
-    let cuda_available = CUDA::default().is_available().unwrap_or(false);
-    let builder = Session::builder()
-        .map_err(err("session builder"))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| format!("optimization level: {e}"))?
-        .with_execution_providers([CUDA::default().build()])
-        .map_err(|e| format!("execution providers: {e}"))?;
+    // Mirror the .onnx provider policy: demand CUDA loudly and fall back to CPU
+    // only if registration genuinely fails. `CUDA::is_available()` reports that
+    // ORT was *compiled* with CUDA support, not that this session got it, so
+    // labelling from it could claim CUDA while inference silently ran on CPU.
+    let builder = |providers: Vec<ExecutionProviderDispatch>| {
+        Session::builder()
+            .map_err(err("session builder"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| format!("optimization level: {e}"))?
+            .with_execution_providers(providers)
+            .map_err(|e| format!("execution providers: {e}"))
+    };
+
+    // Provider is decided before the model is consumed, so a CUDA failure can
+    // still fall back without having to rebuild the graph.
+    let (options, provider) = match builder(vec![CUDA::default().build().error_on_failure()]) {
+        Ok(options) => (options, "CUDA"),
+        Err(cuda_err) => {
+            eprintln!("CUDA unavailable for checkpoint import, using CPU: {cuda_err}");
+            (builder(vec![CPU::default().build()])?, "CPU")
+        }
+    };
+
     let session = model
-        .into_session(&builder)
+        .into_session(&options)
         .map_err(err("creating RRDB session"))?;
-    Ok((
-        session,
-        scale,
-        if cuda_available { "CUDA" } else { "CPU" }.into(),
-    ))
+    Ok((session, scale, provider.into()))
 }
 
 fn err(context: &'static str) -> impl FnOnce(ort::Error) -> String {
