@@ -18,6 +18,7 @@ mod media;
 mod pth;
 mod settings;
 mod stages;
+mod temporal;
 mod upscale;
 
 slint::include_modules!();
