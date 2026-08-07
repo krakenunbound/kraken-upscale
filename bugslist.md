@@ -34,6 +34,9 @@ Last updated: 2026-08-06
 - [x] B24 — clean frame-boundary EOF and truncated-frame EOF are distinguished
 - [x] B26 — Explorer file drops use the native window event stream and show hover feedback
 - [x] B27 — missing GPU runtime no longer appears as an unexplained frozen preview
+- [x] B28 — current video and export queue can be cleared independently
+- [x] B29 — every selectable Source Restore filter runs in the bundled video engine
+- [x] B30 — automatic tiles are capped safely for native 8x models
 
 All confirmed defects in this audit are closed. Native folder-drop loading is
 also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
@@ -222,6 +225,26 @@ also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
   dimensions, model loading, tile progress with elapsed time/ETA, completion,
   and failures. The same entries persist to `activity.log` across restarts.
 
+### B28 — No way to clear the current video or export queue
+- **Where:** `ui/app.slint`, `src/main.rs`
+- **Resolution:** Added independent Clear Video and Clear Queue actions. Queue
+  clearing requests cancellation when necessary; late preview results are
+  generation-guarded so clearing/replacing a video cannot repaint stale output.
+
+### B29 — Heavy-compression Restore generated an invalid filter chain
+- **Where:** `src/media.rs`
+- **What:** The strongest Restore choice used a denoiser absent from the bundled
+  video engine, so selecting it failed before the preview could be decoded.
+- **Resolution:** Replaced it with the bundled threaded bilateral denoiser,
+  logged full source-processing failures to `activity.log`, and executed all
+  four Restore values in the media test and against `SpaceVoyage_2.mp4`.
+
+### B30 — Larger automatic tiles overflow native 8x CUDA graphs
+- **Where:** `src/upscale.rs`, `src/main.rs`
+- **Resolution:** Cap a tile by native model scale so its model output stays at
+  or below 4096px. The RTX 3090 retains the measured 896px tile for 2x/4x
+  models, while an 8x model is safely capped at 512px.
+
 ---
 
 ## Not bugs (known open work / by design)
@@ -232,7 +255,7 @@ These are intentional or documented unfinished work, not silent defects:
 |------|--------|
 | Native `.pth` importer | Completed: direct ZIP and legacy checkpoint loading; 2×/4×/8× verified |
 | Temporal lock / Stability pipeline | Designed; not implemented |
-| Source preprocessing (IVTC, deblock, grain) | Designed; not implemented |
+| Source preprocessing | Deinterlace/deblock/compression cleanup active; IVTC and grain remain |
 | Scale by target format (HD/4K) | Designed in DECISIONS §7 |
 | Performance (tile size, batching, TensorRT, model-scale match) | Known; not correctness bugs |
 | Frame interpolation (RIFE) | UI only — listed as B13 when it misleads |

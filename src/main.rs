@@ -30,7 +30,10 @@ const OVERLAP: u32 = 16;
 
 fn recommended_tile() -> u32 {
     match gpu::stats().map(|s| s.vram_total_gb()) {
-        Some(vram) if vram >= 20.0 => 512,
+        // Measured on the target RTX 3090: 896px was 44% faster than 512px
+        // for the representative 704x1248 UltraSharp frame, while 1024px
+        // regressed slightly.
+        Some(vram) if vram >= 20.0 => 896,
         Some(vram) if vram >= 10.0 => 384,
         _ => SAFE_TILE,
     }
@@ -44,12 +47,15 @@ fn to_image(frame: &media::Frame) -> Image {
 
 /// A preview render request handed to the preview worker.
 struct Job {
+    generation: u64,
     clip: media::ClipInfo,
     at_secs: f64,
     model: upscale::ModelEntry,
     target_scale: u32,
     strength: f32,
     detail_limit: f32,
+    source_treatment: media::SourceTreatment,
+    match_color: bool,
     fp16: bool,
     tile: u32,
 }
@@ -158,6 +164,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_restore_index(saved.restore_index);
     ui.set_detect_fields(saved.detect_fields);
     ui.set_preserve_grain(saved.preserve_grain);
+    ui.set_match_color(saved.match_color);
     ui.set_stability_on(saved.stability);
     ui.set_lock(saved.lock);
     ui.set_cut_detect(saved.cut_detect);
@@ -172,7 +179,8 @@ fn main() -> Result<(), slint::PlatformError> {
     );
 
     let clip: Rc<RefCell<Option<media::ClipInfo>>> = Rc::new(RefCell::new(None));
-    let tx = spawn_preview_worker(ui.as_weak());
+    let preview_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let tx = spawn_preview_worker(ui.as_weak(), preview_generation.clone());
 
     // Kick a preview render from whatever the controls currently say.
     let request = {
@@ -180,6 +188,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let clip = clip.clone();
         let models = models.clone();
         let tx = tx.clone();
+        let preview_generation = preview_generation.clone();
         move || {
             let ui = handle.unwrap();
             let Some(info) = clip.borrow().clone() else {
@@ -203,13 +212,35 @@ fn main() -> Result<(), slint::PlatformError> {
             );
             ui.set_preview_status("upscaling sample frame…".into());
 
+            // Replacing the clip or changing its settings invalidates an older
+            // preview even when this request must wait for an active export.
+            let generation = preview_generation.fetch_add(1, Ordering::Relaxed) + 1;
+
+            if ui.get_export_running() {
+                ui.set_preview_status(
+                    "video loaded · preview deferred while export is running".into(),
+                );
+                log(
+                    &ui.as_weak(),
+                    "preview deferred: active export keeps exclusive use of the GPU",
+                );
+                return;
+            }
+
             let _ = tx.send(Job {
+                generation,
                 clip: info,
                 at_secs,
                 model,
                 target_scale,
                 strength: ui.get_strength(),
                 detail_limit: ui.get_detail_limit(),
+                source_treatment: media::SourceTreatment {
+                    content: ui.get_content_index(),
+                    restore: ui.get_restore_index(),
+                    deinterlace: ui.get_detect_fields(),
+                },
+                match_color: ui.get_match_color(),
                 fp16: ui.get_fp16(),
                 tile: if ui.get_auto_tile() {
                     auto_tile_size
@@ -278,9 +309,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = handle.unwrap();
             if let Some(info) = clip.borrow().as_ref() {
                 // Show the source frame immediately; the model result follows.
-                if let Ok(f) =
-                    media::frame_at(info, pos.clamp(0.0, 1.0) as f64 * info.duration, None)
-                {
+                let treatment = media::SourceTreatment {
+                    content: ui.get_content_index(),
+                    restore: ui.get_restore_index(),
+                    deinterlace: ui.get_detect_fields(),
+                };
+                if let Ok(f) = media::frame_at_with(
+                    info,
+                    pos.clamp(0.0, 1.0) as f64 * info.duration,
+                    None,
+                    treatment,
+                ) {
                     ui.set_frame_before(to_image(&f));
                 }
             }
@@ -322,6 +361,49 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let handle = ui.as_weak();
         let clip = clip.clone();
+        let preview_generation = preview_generation.clone();
+        ui.on_clear_video(move || {
+            let Some(ui) = handle.upgrade() else { return };
+            preview_generation.fetch_add(1, Ordering::Relaxed);
+            clip.borrow_mut().take();
+            ui.set_has_clip(false);
+            ui.set_clip_name("".into());
+            ui.set_clip_specs("".into());
+            ui.set_src_badge("—".into());
+            ui.set_out_badge("—".into());
+            ui.set_source_note("".into());
+            ui.set_preview_status("video cleared".into());
+            ui.set_preview_progress(0.0);
+            ui.set_frame_before(Image::default());
+            ui.set_frame_after(Image::default());
+            ui.set_thumb(Image::default());
+            log(&ui.as_weak(), "current video cleared");
+        });
+    }
+
+    {
+        let handle = ui.as_weak();
+        let queue = queue.clone();
+        let active_cancel = active_cancel.clone();
+        ui.on_clear_queue(move || {
+            if let Ok(slot) = active_cancel.lock() {
+                if let Some(cancel) = slot.as_ref() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            queue.borrow_mut().clear();
+            if let Some(ui) = handle.upgrade() {
+                if let Some(vm) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
+                    vm.clear();
+                }
+                log(&ui.as_weak(), "export queue cleared");
+            }
+        });
+    }
+
+    {
+        let handle = ui.as_weak();
+        let clip = clip.clone();
         let models = models.clone();
         let queue = queue.clone();
         ui.on_add_task(move || {
@@ -352,6 +434,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 target_scale,
                 strength,
                 detail_limit,
+                source_treatment: media::SourceTreatment {
+                    content: ui.get_content_index(),
+                    restore: ui.get_restore_index(),
+                    deinterlace: ui.get_detect_fields(),
+                },
+                match_color: ui.get_match_color(),
                 fp16: ui.get_fp16(),
                 tile: if ui.get_auto_tile() {
                     auto_tile_size
@@ -518,7 +606,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
 /// Runs preview inference off the UI thread. Sessions are expensive to build,
 /// so the loaded model is kept until a different one is asked for.
-fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
+fn spawn_preview_worker(
+    handle: slint::Weak<MainWindow>,
+    current_generation: Arc<std::sync::atomic::AtomicU64>,
+) -> Sender<Job> {
     let (tx, rx) = channel::<Job>();
 
     std::thread::spawn(move || {
@@ -532,17 +623,48 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                 .last()
                 .unwrap();
 
+            if current_generation.load(Ordering::Relaxed) != job.generation {
+                continue;
+            }
+
             let started = std::time::Instant::now();
 
-            let source = match media::frame_at(&job.clip, job.at_secs, None) {
-                Ok(f) => f,
-                Err(e) => {
-                    report(&handle, format!("decode failed: {e}"), None);
-                    continue;
-                }
-            };
+            let source =
+                match media::frame_at_with(&job.clip, job.at_secs, None, job.source_treatment) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        log(&handle, format!("preview source processing failed: {e}"));
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            "source processing failed — full details are in the activity log"
+                                .into(),
+                            None,
+                        );
+                        continue;
+                    }
+                };
 
-            let step = job.tile.saturating_sub(OVERLAP * 2).max(16);
+            if current_generation.load(Ordering::Relaxed) == job.generation {
+                let h = handle.clone();
+                let source_width = source.width;
+                let source_height = source.height;
+                let source_rgb = source.rgb.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = h.upgrade() {
+                        ui.set_frame_before(to_image(&media::Frame {
+                            width: source_width,
+                            height: source_height,
+                            rgb: source_rgb,
+                        }));
+                    }
+                });
+            }
+
+            let listed_scale = job.model.scale.max(1);
+            let preview_tile = job.tile.min(4096 / listed_scale).max(64);
+            let step = preview_tile.saturating_sub(OVERLAP * 2).max(16);
             let tiles = source.width.div_ceil(step) * source.height.div_ceil(step);
             log(
                 &handle,
@@ -555,7 +677,7 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                     source.width.saturating_mul(job.target_scale),
                     source.height.saturating_mul(job.target_scale),
                     job.model.name,
-                    job.tile,
+                    preview_tile,
                 ),
             );
 
@@ -605,7 +727,13 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                     }
                     Err(e) => {
                         log(&handle, format!("model load failed: {e}"));
-                        report(&handle, format!("model load failed: {e}"), None);
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            format!("model load failed: {e}"),
+                            None,
+                        );
                         continue;
                     }
                 }
@@ -618,15 +746,27 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
             if up.provider != "CUDA" {
                 let message = "GPU runtime unavailable — preview stopped instead of running an impractically slow CPU render";
                 log(&handle, message);
-                report(&handle, message.into(), None);
+                report_current(
+                    &handle,
+                    &current_generation,
+                    job.generation,
+                    message.into(),
+                    None,
+                );
                 continue;
             }
+            let preview_tile = up.effective_tile(preview_tile);
 
             // Feed tile progress back so the status bar fills as the frame
             // resolves rather than sitting blank for several seconds.
             let progress_handle = handle.clone();
             let progress_started = std::time::Instant::now();
+            let progress_generation = current_generation.clone();
+            let job_generation = job.generation;
             let mut on_progress = move |done: u32, total: u32| {
+                if progress_generation.load(Ordering::Relaxed) != job_generation {
+                    return;
+                }
                 let frac = if total == 0 {
                     0.0
                 } else {
@@ -659,13 +799,19 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                 });
             };
 
-            match up.run(&source, job.tile, OVERLAP, &mut on_progress) {
+            match up.run(&source, preview_tile, OVERLAP, &mut on_progress) {
                 Ok(out) => {
                     // Order matters: clamp structural error first, then mix
                     // toward the source, then resample to the requested scale.
                     // Resampling last means a 4x model asked for 2x gets its
                     // invented high-frequency detail averaged away.
-                    let limited = upscale::clamp_deviation(&out, &source, job.detail_limit * 255.0);
+                    let colored = if job.match_color {
+                        upscale::match_color_to_source(&out, &source)
+                    } else {
+                        out
+                    };
+                    let limited =
+                        upscale::clamp_deviation(&colored, &source, job.detail_limit * 255.0);
                     let blended = upscale::blend_toward_source(&limited, &source, job.strength);
                     let final_frame = upscale::resample(
                         &blended,
@@ -698,11 +844,23 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                         up.provider
                     );
                     log(&handle, format!("preview completed: {note}"));
-                    report(&handle, note, Some(final_frame));
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        note,
+                        Some(final_frame),
+                    );
                 }
                 Err(e) => {
                     log(&handle, format!("preview failed: {e}"));
-                    report(&handle, format!("inference failed: {e}"), None);
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        format!("inference failed: {e}"),
+                        None,
+                    );
                 }
             }
         }
@@ -1040,6 +1198,7 @@ fn collect_settings(ui: &MainWindow, models: &[upscale::ModelEntry]) -> settings
         restore_index: ui.get_restore_index(),
         detect_fields: ui.get_detect_fields(),
         preserve_grain: ui.get_preserve_grain(),
+        match_color: ui.get_match_color(),
         stability: ui.get_stability_on(),
         lock: ui.get_lock(),
         cut_detect: ui.get_cut_detect(),
@@ -1077,6 +1236,18 @@ fn report(handle: &slint::Weak<MainWindow>, status: String, frame: Option<media:
     });
 }
 
+fn report_current(
+    handle: &slint::Weak<MainWindow>,
+    current_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    status: String,
+    frame: Option<media::Frame>,
+) {
+    if current_generation.load(Ordering::Relaxed) == generation {
+        report(handle, status, frame);
+    }
+}
+
 fn load_clip(ui: &MainWindow, info: &media::ClipInfo) {
     ui.set_clip_name(info.file_name().into());
     ui.set_clip_specs(info.specs().into());
@@ -1098,7 +1269,7 @@ fn load_clip(ui: &MainWindow, info: &media::ClipInfo) {
     let mut notes = Vec::new();
     if info.is_interlaced() {
         notes.push(format!(
-            "Interlaced ({}) — preprocessing is not active yet",
+            "Interlaced ({}) detected — choose a TV profile and enable Deinterlace",
             info.field_order
         ));
     }
@@ -1140,5 +1311,38 @@ mod ui_tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         slint::platform::update_timers_and_animations();
         assert_eq!(ui.get_dock_current_width(), 30.0);
+    }
+
+    #[test]
+    #[ignore = "set KRAKEN_TEST_CLIP to benchmark real GPU tile sizes"]
+    fn benchmark_preview_tile_sizes() {
+        let path = std::env::var_os("KRAKEN_TEST_CLIP")
+            .map(std::path::PathBuf::from)
+            .expect("KRAKEN_TEST_CLIP is required");
+        let _ = cuda::prepare();
+        let clip = media::probe(&path).expect("probe clip");
+        let frame = media::frame_at(&clip, 0.0, None).expect("decode frame");
+        let entry = upscale::registry()
+            .into_iter()
+            .find(|model| model.name == "4x-UltraSharp")
+            .expect("find UltraSharp");
+        let mut up = upscale::Upscaler::load(&entry, true).expect("load model");
+        assert_eq!(up.provider, "CUDA");
+
+        for tile in [512, 640, 896, 1024] {
+            let started = std::time::Instant::now();
+            let out = up
+                .run(&frame, tile, OVERLAP, &mut |_, _| {})
+                .unwrap_or_else(|e| panic!("tile {tile}: {e}"));
+            eprintln!(
+                "tile {tile}: {:.3}s for {}x{} -> {}x{}",
+                started.elapsed().as_secs_f32(),
+                frame.width,
+                frame.height,
+                out.width,
+                out.height
+            );
+            drop(out);
+        }
     }
 }

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use ort::ep::{ExecutionProviderDispatch, CPU, CUDA};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
+use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::media::Frame;
@@ -182,6 +183,12 @@ pub struct Upscaler {
 }
 
 impl Upscaler {
+    /// Keeps the native model output tile at or below 4096px. Larger pitches
+    /// exceed CUDA indexing limits for some 8x RRDB graphs.
+    pub fn effective_tile(&self, requested: u32) -> u32 {
+        requested.min(4096 / self.scale.max(1)).max(64)
+    }
+
     pub fn load(entry: &ModelEntry, fp16: bool) -> Result<Self, String> {
         if Path::new(&entry.file).extension().and_then(|e| e.to_str()) == Some("pth") {
             let (session, scale, provider) = pth::load_rrdb(&models_dir().join(&entry.file))?;
@@ -280,6 +287,7 @@ impl Upscaler {
         overlap: u32,
         on_progress: &mut dyn FnMut(u32, u32),
     ) -> Result<Frame, String> {
+        let tile = self.effective_tile(tile);
         let (sw, sh) = (frame.width, frame.height);
         let s = self.scale;
         let (dw, dh) = (sw * s, sh * s);
@@ -404,36 +412,96 @@ pub fn blend_toward_source(model_out: &Frame, source: &Frame, strength: f32) -> 
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
 
-    for y in 0..dh as usize {
-        let fy = ((y as f32 + 0.5) * yr - 0.5).max(0.0);
-        let y0 = fy.floor() as usize;
-        let y1 = (y0 + 1).min(sh as usize - 1);
-        let wy = fy - y0 as f32;
+    rgb.par_chunks_mut(dw as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let fy = ((y as f32 + 0.5) * yr - 0.5).max(0.0);
+            let y0 = fy.floor() as usize;
+            let y1 = (y0 + 1).min(sh as usize - 1);
+            let wy = fy - y0 as f32;
 
-        for x in 0..dw as usize {
-            let fx = ((x as f32 + 0.5) * xr - 0.5).max(0.0);
-            let x0 = fx.floor() as usize;
-            let x1 = (x0 + 1).min(sw as usize - 1);
-            let wx = fx - x0 as f32;
+            for (x, pixel) in row.chunks_mut(3).enumerate() {
+                let fx = ((x as f32 + 0.5) * xr - 0.5).max(0.0);
+                let x0 = fx.floor() as usize;
+                let x1 = (x0 + 1).min(sw as usize - 1);
+                let wx = fx - x0 as f32;
 
-            let di = (y * dw as usize + x) * 3;
-            for c in 0..3 {
-                let p = |px: usize, py: usize| -> f32 {
-                    source.rgb[(py * sw as usize + px) * 3 + c] as f32
-                };
-                let top = p(x0, y0) * (1.0 - wx) + p(x1, y0) * wx;
-                let bot = p(x0, y1) * (1.0 - wx) + p(x1, y1) * wx;
-                let base = top * (1.0 - wy) + bot * wy;
+                for (c, channel) in pixel.iter_mut().enumerate() {
+                    let p = |px: usize, py: usize| -> f32 {
+                        source.rgb[(py * sw as usize + px) * 3 + c] as f32
+                    };
+                    let top = p(x0, y0) * (1.0 - wx) + p(x1, y0) * wx;
+                    let bot = p(x0, y1) * (1.0 - wx) + p(x1, y1) * wx;
+                    let base = top * (1.0 - wy) + bot * wy;
 
-                let model = model_out.rgb[di + c] as f32;
-                rgb[di + c] = (model * strength + base * (1.0 - strength)).clamp(0.0, 255.0) as u8;
+                    let model = model_out.rgb[(y * dw as usize + x) * 3 + c] as f32;
+                    *channel = (model * strength + base * (1.0 - strength)).clamp(0.0, 255.0) as u8;
+                }
             }
-        }
-    }
+        });
 
     Frame {
         width: dw,
         height: dh,
+        rgb,
+    }
+}
+
+/// Matches per-channel mean and contrast to the source while limiting the
+/// correction so a single unusual frame cannot produce a dramatic color jump.
+pub fn match_color_to_source(model_out: &Frame, source: &Frame) -> Frame {
+    fn stats(frame: &Frame) -> ([f64; 3], [f64; 3]) {
+        let (sum, square, count) = frame
+            .rgb
+            .par_chunks_exact(3)
+            .fold(
+                || ([0.0; 3], [0.0; 3], 0u64),
+                |(mut sum, mut square, count), pixel| {
+                    for channel in 0..3 {
+                        let value = pixel[channel] as f64;
+                        sum[channel] += value;
+                        square[channel] += value * value;
+                    }
+                    (sum, square, count + 1)
+                },
+            )
+            .reduce(
+                || ([0.0; 3], [0.0; 3], 0u64),
+                |(mut a_sum, mut a_square, a_count), (b_sum, b_square, b_count)| {
+                    for channel in 0..3 {
+                        a_sum[channel] += b_sum[channel];
+                        a_square[channel] += b_square[channel];
+                    }
+                    (a_sum, a_square, a_count + b_count)
+                },
+            );
+        let count = count.max(1) as f64;
+        let mut mean = [0.0; 3];
+        let mut deviation = [1.0; 3];
+        for channel in 0..3 {
+            mean[channel] = sum[channel] / count;
+            deviation[channel] = (square[channel] / count - mean[channel] * mean[channel])
+                .max(1.0)
+                .sqrt();
+        }
+        (mean, deviation)
+    }
+
+    let (model_mean, model_deviation) = stats(model_out);
+    let (source_mean, source_deviation) = stats(source);
+    let mut rgb = model_out.rgb.clone();
+    rgb.par_chunks_mut(3).for_each(|pixel| {
+        for channel in 0..3 {
+            let gain = (source_deviation[channel] / model_deviation[channel]).clamp(0.8, 1.25);
+            let corrected =
+                (pixel[channel] as f64 - model_mean[channel]) * gain + source_mean[channel];
+            pixel[channel] = corrected.clamp(0.0, 255.0) as u8;
+        }
+    });
+
+    Frame {
+        width: model_out.width,
+        height: model_out.height,
         rgb,
     }
 }
@@ -459,11 +527,13 @@ pub fn clamp_deviation(model_out: &Frame, source: &Frame, limit: f32) -> Frame {
 
     let base = resample(source, model_out.width, model_out.height);
     let mut rgb = model_out.rgb.clone();
-    for (pixel, &base_pixel) in rgb.iter_mut().zip(&base.rgb) {
-        let b = base_pixel as f32;
-        let m = *pixel as f32;
-        *pixel = m.clamp(b - limit, b + limit).clamp(0.0, 255.0) as u8;
-    }
+    rgb.par_iter_mut()
+        .zip(base.rgb.par_iter())
+        .for_each(|(pixel, &base_pixel)| {
+            let b = base_pixel as f32;
+            let m = *pixel as f32;
+            *pixel = m.clamp(b - limit, b + limit).clamp(0.0, 255.0) as u8;
+        });
 
     Frame {
         width: model_out.width,
@@ -489,33 +559,34 @@ pub fn resample(src: &Frame, dw: u32, dh: u32) -> Frame {
     let xr = sw as f32 / dw as f32;
     let yr = sh as f32 / dh as f32;
 
-    for y in 0..dh as usize {
-        let y0 = ((y as f32) * yr).floor() as usize;
-        let y1 = (((y as f32 + 1.0) * yr).ceil() as usize)
-            .min(sh)
-            .max(y0 + 1);
-        for x in 0..dw as usize {
-            let x0 = ((x as f32) * xr).floor() as usize;
-            let x1 = (((x as f32 + 1.0) * xr).ceil() as usize)
-                .min(sw)
-                .max(x0 + 1);
+    rgb.par_chunks_mut(dw as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y0 = ((y as f32) * yr).floor() as usize;
+            let y1 = (((y as f32 + 1.0) * yr).ceil() as usize)
+                .min(sh)
+                .max(y0 + 1);
+            for (x, pixel) in row.chunks_mut(3).enumerate() {
+                let x0 = ((x as f32) * xr).floor() as usize;
+                let x1 = (((x as f32 + 1.0) * xr).ceil() as usize)
+                    .min(sw)
+                    .max(x0 + 1);
 
-            let n = ((x1 - x0) * (y1 - y0)) as f32;
-            let mut acc = [0f32; 3];
-            for sy in y0..y1 {
-                for sx in x0..x1 {
-                    let si = (sy * sw + sx) * 3;
-                    acc[0] += src.rgb[si] as f32;
-                    acc[1] += src.rgb[si + 1] as f32;
-                    acc[2] += src.rgb[si + 2] as f32;
+                let n = ((x1 - x0) * (y1 - y0)) as f32;
+                let mut acc = [0f32; 3];
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        let si = (sy * sw + sx) * 3;
+                        acc[0] += src.rgb[si] as f32;
+                        acc[1] += src.rgb[si + 1] as f32;
+                        acc[2] += src.rgb[si + 2] as f32;
+                    }
+                }
+                for c in 0..3 {
+                    pixel[c] = (acc[c] / n).clamp(0.0, 255.0) as u8;
                 }
             }
-            let di = (y * dw as usize + x) * 3;
-            for c in 0..3 {
-                rgb[di + c] = (acc[c] / n).clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
+        });
 
     Frame {
         width: dw,
@@ -569,5 +640,26 @@ fn blend_into(
             accum[di * 3 + 2] += tile[plane * 2 + si] * w;
             weight[di] += w;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_match_corrects_channel_drift() {
+        let source = Frame {
+            width: 2,
+            height: 1,
+            rgb: vec![80, 100, 120, 120, 140, 160],
+        };
+        let shifted = Frame {
+            width: 2,
+            height: 1,
+            rgb: vec![100, 120, 140, 140, 160, 180],
+        };
+        let matched = match_color_to_source(&shifted, &source);
+        assert_eq!(matched.rgb, source.rgb);
     }
 }

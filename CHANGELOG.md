@@ -30,6 +30,13 @@
 
 ### Media correctness
 
+- Restored functional Source profiles: broadcast profiles can deinterlace
+  detected fields, and the Restore selector applies light/strong deblocking or
+  heavy-compression cleanup before inference.
+- Kept every Restore option within the filters shipped by the bundled video
+  engine and added execution coverage for all four selector values.
+- Added real source-color matching with bounded per-channel mean/contrast
+  correction in preview and export.
 - Probed both average and nominal frame rates and retained the selected rational
   rate throughout decode and encode.
 - Added explicit conversion to constant frame rate for the raw-frame pipeline.
@@ -39,6 +46,11 @@
 
 ### Interface and lifecycle
 
+- Added Clear Video and Clear Queue actions; clearing a running queue also
+  requests cancellation, while clearing a video leaves queued snapshots intact.
+- Restored the primary button label from `Export Next` to `Export`.
+- Deferred new-video previews during an active export so the next video can be
+  configured without competing for GPU time.
 - Made missing GPU runtime a visible blocking state instead of silently starting
   an impractically slow CPU preview.
 - Added preview start, model-load, per-tile progress/ETA, completion, and failure
@@ -62,6 +74,13 @@
 
 ### Verification
 
+- Benchmarked automatic tile sizes on the target RTX 3090 using
+  `SpaceVoyage_2.mp4`: 896px reduced the model pass from 4.57s to 2.56s versus
+  512px.
+- Raised the 24 GB automatic tile profile to the measured 896px optimum and
+  parallelized color, blend, clamp, and resampling work across CPU cores.
+- Made tiles scale-aware so native 8x models stay within a safe 4096px output
+  pitch while 2x/4x models still benefit from larger tiles.
 - Added tests for odd-dimension output sizing, exact EOF, truncated frame input,
   anamorphic media normalization, frame decoding, and dock width animation.
 - Verified direct import and inference with unchanged RealESRGAN 2×/4×,

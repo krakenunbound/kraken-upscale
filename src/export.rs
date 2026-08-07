@@ -28,6 +28,8 @@ pub struct ExportSpec {
     pub target_scale: u32,
     pub strength: f32,
     pub detail_limit: f32,
+    pub source_treatment: media::SourceTreatment,
+    pub match_color: bool,
     pub fp16: bool,
     pub tile: u32,
     pub out_path: PathBuf,
@@ -59,11 +61,11 @@ fn quiet(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-fn spawn_decoder(clip: &ClipInfo) -> Result<Child, String> {
+fn spawn_decoder(clip: &ClipInfo, treatment: media::SourceTreatment) -> Result<Child, String> {
     let mut cmd = Command::new(media::ffmpeg());
     quiet(&mut cmd).args(["-v", "error", "-i"]);
     cmd.arg(&clip.path);
-    cmd.args(["-vf", &clip.decode_filter()]);
+    cmd.args(["-vf", &clip.decode_filter(treatment)]);
     cmd.args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -172,7 +174,7 @@ pub fn run(
     let frame_bytes = (sw as usize) * (sh as usize) * 3;
     let total = spec.clip.frames.max(1);
 
-    let mut decoder = spawn_decoder(&spec.clip)?;
+    let mut decoder = spawn_decoder(&spec.clip, spec.source_treatment)?;
     let mut decoder_err = decoder.stderr.take().map(drain);
     let mut encoder = match spawn_encoder(spec) {
         Ok(child) => child,
@@ -223,7 +225,12 @@ pub fn run(
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let limited = upscale::clamp_deviation(&out, &source, spec.detail_limit * 255.0);
+            let colored = if spec.match_color {
+                upscale::match_color_to_source(&out, &source)
+            } else {
+                out
+            };
+            let limited = upscale::clamp_deviation(&colored, &source, spec.detail_limit * 255.0);
             let blended = upscale::blend_toward_source(&limited, &source, spec.strength);
             let (ow, oh) = spec.output_size();
             let final_frame = upscale::resample(&blended, ow, oh);
@@ -309,6 +316,8 @@ mod tests {
             target_scale: scale,
             strength: 1.0,
             detail_limit: 1.0,
+            source_treatment: media::SourceTreatment::default(),
+            match_color: true,
             fp16: false,
             tile: 256,
             out_path: PathBuf::from("output.mp4"),

@@ -410,31 +410,32 @@ fp32** — otherwise the application has to feed f16 buffers.
 Measured against Aiarty Video Enhancer on the same clip and it is significantly
 slower. Causes, largest first:
 
-1. **A 4x model is being run for a 2x output** (see §7). ~4x the compute before
-   anything else. Aiarty at x2 is near-certainly running a natively-2x network.
+1. **A 4x model is being run for a 2x output** (see §7). A native 2x model saves
+   work, although the measured RealESRGAN_x2 gain on the representative clip
+   was only about 17% (3.5s versus 4.2s), not the theoretical 4x.
 2. **RRDBNet is heavy and old.** ESRGAN-family: 23 RRDB blocks × 64 channels,
    ~16.7M parameters, 2018-era. Aiarty's `moDetail-HQ v3` is proprietary but
    almost certainly a modern lightweight net — SPAN/Compact-style architectures
    reach comparable quality at **10–50x less compute**. No amount of optimising
    RRDBNet closes an architectural gap that size.
 3. **No TensorRT** — plain CUDA EP leaves 2–4x unclaimed.
-4. **Tiles are conservative.** 256px with 16px overlap is 24 tiles for a
-   704×1248 frame, each with launch overhead, and the overlap computes ~30%
-   redundant pixels. 24 GB fits that whole frame in one pass; the tile size was
-   chosen for safety, not for this card.
+4. **Tile size was conservative.** This is now measured on the target 3090 and
+   the 704×1248 `SpaceVoyage_2.mp4` UltraSharp frame: 512/640/896/1024px took
+   4.57/4.36/2.56/2.68 seconds. Auto mode now uses 896px on 20+ GB cards, with
+   a scale-aware cap that keeps native 8x model outputs at or below 4096px.
 5. **No tile batching** — tiles run one at a time, so the GPU idles between
    launches.
-6. **Post-processing is scalar and single-threaded** — the CHW conversion,
-   clamp, blend and resample each loop pixel-by-pixel on one core across a
-   14-megapixel output. Not dominant, but wants `rayon`.
+6. **Post-processing was single-threaded.** Color matching, clamp, blend, and
+   resampling now use the CPU thread pool. Tile assembly remains serial because
+   overlapping feather regions share accumulators.
 
 | Fix | Expected gain |
 |---|---|
-| Match model native scale to target (RealESRGAN_x2 for 2x) | ~4x |
-| Whole-frame or 512px tiles | ~1.3–1.5x |
+| Match model native scale to target (RealESRGAN_x2 for 2x) | ~1.2x measured |
+| 896px tiles on the RTX 3090 | ~1.7x measured |
 | Batch tiles | ~1.5–2x |
 | TensorRT EP | ~2–4x |
-| Parallelise the Rust loops | modest |
+| Parallelise the Rust loops | Landed; modest |
 | **Modern lightweight architecture (SPAN / Compact)** | **10x+** |
 
 The first four compound to plausibly 10–20x without changing models. But
@@ -478,9 +479,9 @@ audio remux as a complete chain.
 | Native `.pth` importer | **Complete** — direct legacy/ZIP RRDBNet loading, 2×/4×/8× verified |
 | Dock panel slide-out | **Verified** — automated UI test confirms 30→410→30 animation |
 | Temporal lock (flow-guided stabilization) | Not started — the Topaz-gap feature |
-| Source preprocessing front-end | Not started — deinterlace / IVTC / deblock / grain |
+| Source preprocessing front-end | Partial — profile-driven deinterlace/deblock active; IVTC/grain remain |
 | Scale by target format (HD/2K/4K) | Designed (§7), not built |
-| Performance pass | Model-scale matching and automatic tile size landed; batching/TensorRT remain |
+| Performance pass | 896px RTX 3090 profile and parallel post-processing landed; batching/TensorRT remain |
 | Export cancel button | **Complete** — stops the active batch and removes partial output |
 | Auto tile size checkbox | **Complete** — persisted and VRAM-aware |
 | Frame interpolation (RIFE) | Planned and clearly disabled |
@@ -497,7 +498,7 @@ audio remux as a complete chain.
 | `src/media.rs` | ffprobe metadata, single-frame decode |
 | `src/gpu.rs` | nvidia-smi telemetry, runtime versions |
 | `src/cuda.rs` | CUDA DLL discovery |
-| `src/dnd.rs` | Win32 `WM_DROPFILES` subclass |
+| `src/dnd.rs` | Native window-event file drop integration |
 | `src/settings.rs` | Persisted settings |
 | `ui/app.slint` | Layout |
 | `ui/widgets.slint` | Components |

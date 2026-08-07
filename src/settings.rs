@@ -24,6 +24,7 @@ pub struct Settings {
     pub restore_index: i32,
     pub detect_fields: bool,
     pub preserve_grain: bool,
+    pub match_color: bool,
 
     pub stability: bool,
     pub lock: f32,
@@ -53,6 +54,7 @@ impl Default for Settings {
             restore_index: 0,
             detect_fields: false,
             preserve_grain: false,
+            match_color: true,
 
             stability: true,
             lock: 0.75,

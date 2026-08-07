@@ -35,6 +35,36 @@ pub struct ClipInfo {
     pub field_order: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SourceTreatment {
+    pub content: i32,
+    pub restore: i32,
+    pub deinterlace: bool,
+}
+
+impl SourceTreatment {
+    fn filters(self, clip: &ClipInfo) -> Vec<String> {
+        let mut filters = Vec::new();
+        let broadcast_profile = matches!(self.content, 2 | 3);
+        if self.deinterlace && broadcast_profile && clip.is_interlaced() {
+            filters.push("bwdif=mode=send_frame:parity=auto:deint=interlaced".into());
+        }
+        match self.restore {
+            1 => filters.push("deblock=filter=weak:block=8".into()),
+            2 => filters.push("deblock=filter=strong:block=8".into()),
+            3 => {
+                filters.push("deblock=filter=strong:block=8".into());
+                // This FFmpeg build does not include hqdn3d. Keep the strong
+                // restore path self-contained with its available, threaded
+                // spatial denoiser instead.
+                filters.push("bilateral=sigmaS=0.1:sigmaR=0.05:planes=7".into());
+            }
+            _ => {}
+        }
+        filters
+    }
+}
+
 impl ClipInfo {
     pub fn file_name(&self) -> String {
         self.path
@@ -58,11 +88,14 @@ impl ClipInfo {
 
     /// The raw pipe has no timestamps or pixel-aspect metadata. Normalize both
     /// explicitly so preview and export see identical square-pixel CFR frames.
-    pub fn decode_filter(&self) -> String {
-        format!(
+    pub fn decode_filter(&self, treatment: SourceTreatment) -> String {
+        let mut filters = treatment.filters(self);
+        let geometry = format!(
             "scale={}:{}:flags=lanczos,setsar=1,fps={}",
             self.width, self.height, self.fps_rate
-        )
+        );
+        filters.push(geometry);
+        filters.join(",")
     }
 
     pub fn is_interlaced(&self) -> bool {
@@ -218,13 +251,25 @@ pub fn frame_at(
     at_secs: f64,
     scale_to: Option<(u32, u32)>,
 ) -> Result<Frame, String> {
+    frame_at_with(clip, at_secs, scale_to, SourceTreatment::default())
+}
+
+pub fn frame_at_with(
+    clip: &ClipInfo,
+    at_secs: f64,
+    scale_to: Option<(u32, u32)>,
+    treatment: SourceTreatment,
+) -> Result<Frame, String> {
     let (w, h) = scale_to.unwrap_or((clip.width, clip.height));
 
     let mut cmd = Command::new(ffmpeg());
     quiet(&mut cmd).args(["-v", "error", "-ss", &format!("{at_secs:.3}")]);
     cmd.arg("-i").arg(&clip.path).args(["-frames:v", "1"]);
 
-    let filter = format!("scale={w}:{h}:flags=lanczos,setsar=1");
+    let mut filters = treatment.filters(clip);
+    let geometry = format!("scale={w}:{h}:flags=lanczos,setsar=1");
+    filters.push(geometry);
+    let filter = filters.join(",");
     cmd.args(["-vf", &filter]);
 
     let out = cmd
@@ -290,9 +335,39 @@ mod tests {
         assert_eq!(info.sample_aspect_ratio, "8:9");
         assert_eq!(info.fps_rate, "30000/1001");
 
+        let mut interlaced = info.clone();
+        interlaced.field_order = "tt".into();
+        let treatment = SourceTreatment {
+            content: 3,
+            restore: 2,
+            deinterlace: true,
+        };
+        let filter = interlaced.decode_filter(treatment);
+        assert!(filter.contains("bwdif=mode=send_frame"));
+        assert!(filter.contains("deblock=filter=strong"));
+        assert!(filter.ends_with("setsar=1,fps=30000/1001"));
+
         let frame = frame_at(&info, 0.0, None).expect("decode square-pixel frame");
         assert_eq!((frame.width, frame.height), (640, 480));
         assert_eq!(frame.rgb.len(), 640 * 480 * 3);
+
+        // Every user-selectable restore value must be accepted by the exact
+        // vendored FFmpeg build; checking only one value previously let the
+        // strongest option regress unnoticed.
+        for restore in 0..=3 {
+            let restored = frame_at_with(
+                &info,
+                0.0,
+                None,
+                SourceTreatment {
+                    restore,
+                    ..treatment
+                },
+            )
+            .unwrap_or_else(|error| panic!("restore option {restore} failed: {error}"));
+            assert_eq!((restored.width, restored.height), (640, 480));
+            assert_eq!(restored.rgb.len(), 640 * 480 * 3);
+        }
 
         let _ = std::fs::remove_file(path);
     }

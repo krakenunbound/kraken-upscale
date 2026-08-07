@@ -53,6 +53,7 @@ export component MainWindow inherits Window {
     in-out property <int> restore-index: 0;
     in-out property <bool> detect-fields: false;
     in-out property <bool> preserve-grain: false;
+    in-out property <bool> match-color: true;
     in-out property <bool> stability-on: true;
     in-out property <float> lock: 0.75;
     in-out property <float> cut-detect: 0.4;
@@ -116,6 +117,8 @@ export component MainWindow inherits Window {
     property <bool> col-open: false;
 
     callback import-clicked();
+    callback clear-video();
+    callback clear-queue();
     callback seek(float);
     callback settings-changed();
     callback reset-view();
@@ -1046,6 +1049,14 @@ export component MainWindow inherits Window {
 
                                 Rectangle { horizontal-stretch: 1; }
 
+                                Btn {
+                                    text: "Clear Queue";
+                                    width: 86px;
+                                    height: 24px;
+                                    enabled: root.tasks.length > 0;
+                                    clicked => { root.clear-queue(); }
+                                }
+
                                 Mono {
                                     text: "\{root.tasks.length} queued";
                                     color: Pal.text-mute;
@@ -1260,6 +1271,17 @@ export component MainWindow inherits Window {
                                                 visible: root.has-clip;
                                             }
                                         }
+
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Btn {
+                                                text: "Clear";
+                                                width: 56px;
+                                                height: 26px;
+                                                enabled: root.has-clip;
+                                                clicked => { root.clear-video(); }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1268,7 +1290,7 @@ export component MainWindow inherits Window {
 
                                 // ── Source ──────────────────────────────
                                 SectionHeader {
-                                    title: "Source — planned";
+                                    title: "Source";
                                     gated: false;
                                     enabled: true;
                                     expanded <=> root.src-open;
@@ -1282,13 +1304,13 @@ export component MainWindow inherits Window {
 
                                     Help {
                                         lines: 2;
-                                        text: "Preprocessing is not active yet. These controls are shown as the planned pipeline.";
+                                        text: "Source profile and restoration are applied before AI upscaling.";
                                     }
 
                                     FieldRow {
                                         text: "Content";
                                         accent: true;
-                                        enabled: false;
+                                        enabled: root.has-clip;
                                         current <=> root.content-index;
                                         changed(i) => { root.settings-changed(); }
                                         items: [
@@ -1331,7 +1353,7 @@ export component MainWindow inherits Window {
 
                                     FieldRow {
                                         text: "Restore";
-                                        enabled: false;
+                                        enabled: root.has-clip;
                                         current <=> root.restore-index;
                                         changed(i) => { root.settings-changed(); }
                                         items: [
@@ -1343,14 +1365,14 @@ export component MainWindow inherits Window {
                                     }
 
                                     CheckRow {
-                                        text: "Detect field order & telecine";
-                                        enabled: false;
+                                        text: "Deinterlace detected fields";
+                                        enabled: root.has-clip && (root.content-index == 2 || root.content-index == 3);
                                         checked <=> root.detect-fields;
                                         toggled(v) => { root.settings-changed(); }
                                     }
 
                                     CheckRow {
-                                        text: "Preserve grain (extract & re-apply)";
+                                        text: "Preserve grain — planned";
                                         enabled: false;
                                         checked <=> root.preserve-grain;
                                         toggled(v) => { root.settings-changed(); }
@@ -1377,7 +1399,7 @@ export component MainWindow inherits Window {
 
                                     Help {
                                         lines: 2;
-                                        text: "Backend is automatic: CUDA is preferred and CPU is used only when CUDA cannot load.";
+                                        text: "The bundled GPU runtime is required for preview and export; missing GPU support is reported instead of silently rendering very slowly.";
                                     }
 
                                     FieldRow {
@@ -1544,9 +1566,9 @@ export component MainWindow inherits Window {
 
                                 // ── Color ───────────────────────────────
                                 col-hdr := SectionHeader {
-                                    title: "Color — planned";
+                                    title: "Color";
                                     gated: false;
-                                    enabled: false;
+                                    enabled: true;
                                     expanded <=> root.col-open;
                                 }
 
@@ -1559,8 +1581,9 @@ export component MainWindow inherits Window {
                                     CheckRow {
                                         text: "Match to source";
                                         hint: "Corrects any color drift the model introduces.";
-                                        checked: true;
-                                        enabled: col-hdr.enabled;
+                                        checked <=> root.match-color;
+                                        enabled: root.has-clip;
+                                        toggled(v) => { root.settings-changed(); }
                                     }
                                 }
 
@@ -1624,7 +1647,7 @@ export component MainWindow inherits Window {
                                 spacing: 10px;
 
                                 Btn {
-                                    text: "Export Next";
+                                    text: "Export";
                                     primary: true;
                                     horizontal-stretch: 1;
                                     enabled: root.tasks.length > 0 && !root.export-running;
