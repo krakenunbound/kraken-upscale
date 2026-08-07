@@ -455,6 +455,44 @@ SeedVR2 3B/7B is already on this machine but is a diffusion transformer in
 fp8/GGUF — it belongs in ComfyUI as a "hero shot" tool for short clips, not in a
 Rust `.exe`.
 
+### The temporal lock smooths real change as well as invented change
+
+**This is a limitation of the approach, not a bug, and it cannot be engineered
+away.** Recorded here so it is not repeatedly rediscovered and "fixed".
+
+The lock blends the warped previous output into the current frame. That is a
+temporal filter, and a temporal filter has no way to tell *invented texture that
+changed* from *real content that changed* — both are simply differences between
+consecutive frames at similar spatial frequencies.
+
+Measured on `SpaceVoyage_2` with Lock 0.75, using a strength-0 export through
+the identical pipeline as the no-invented-detail floor:
+
+| | flicker |
+|---|---|
+| floor (no invented detail) | 1.348 |
+| unlocked | 1.613 |
+| locked | **1.203** |
+
+Locked output sits *below* the floor. It removed all of the model's added
+flicker (0.265) and then a further 0.145 of change that was genuinely in the
+source.
+
+Two things follow:
+
+1. **Confidence gating does not solve it.** The gate releases on low match
+   quality, occlusion and displacement — none of which are present on
+   near-static content, which is exactly where the over-smoothing is worst.
+   A motion-based release (16 px, §see `temporal::MOTION_RELEASE`) helps the
+   *smearing* case and does nothing for this one.
+2. **Only Lock strength trades it off**, and the right value is a perceptual
+   judgement. A residual metric cannot distinguish "held still correctly" from
+   "smoothed away detail I wanted" — both reduce frame-to-frame difference, so
+   optimising the metric drives the setting to 1.0, which is wrong.
+
+The preview renders the preceding frame so this can be judged by eye
+(§10 of CHANGELOG, A1). Choosing the shipped default is an open item.
+
 ---
 
 ## 13. Open work
@@ -478,14 +516,15 @@ audio remux as a complete chain.
 |---|---|
 | Native `.pth` importer | **Complete** — direct legacy/ZIP RRDBNet loading, 2×/4×/8× verified |
 | Dock panel slide-out | **Verified** — automated UI test confirms 30→410→30 animation |
-| Temporal lock (flow-guided stabilization) | Not started — the Topaz-gap feature |
+| Temporal lock (flow-guided stabilization) | **Complete** — flow, confidence gate, export and preview; default Lock value still to choose (§12) |
 | Source preprocessing front-end | Partial — profile-driven deinterlace/deblock active; IVTC/grain remain |
 | Scale by target format (HD/2K/4K) | Designed (§7), not built |
 | Performance pass | 896px RTX 3090 profile and parallel post-processing landed; batching/TensorRT remain |
 | Export cancel button | **Complete** — stops the active batch and removes partial output |
 | Auto tile size checkbox | **Complete** — persisted and VRAM-aware |
 | Frame interpolation (RIFE) | **Complete** — native CUDA ONNX stage, arbitrary 48/60/120 fps, cut protection |
-| Stability controls | Planned and clearly disabled until the temporal-lock pipeline exists |
+| Stability controls | **Complete** — real controls, previewable |
+| No-cut-ghosting verification | **Blocked** — no test clip contains a hard edit |
 
 ### RIFE deployment
 
