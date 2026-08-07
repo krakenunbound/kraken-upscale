@@ -536,6 +536,87 @@ mod tests {
         assert!(read_frame(&mut partial, &mut frame).is_err());
     }
 
+    /// Settles the FP16 question, which earlier measurements could not.
+    ///
+    /// The first comparison folded CUDA session creation and cuDNN autotuning
+    /// into the per-frame average, so fp16 appeared *slower* than fp32. Now
+    /// that warm-up is tracked separately, both can be compared on steady-state
+    /// model time alone.
+    ///
+    /// `cargo test --release fp16_versus_fp32 -- --ignored --nocapture`
+    #[test]
+    #[ignore = "set KRAKEN_TEST_CLIP to compare fp16 against fp32"]
+    fn fp16_versus_fp32() {
+        let _ = crate::cuda::prepare();
+        let source = std::env::var_os("KRAKEN_TEST_CLIP")
+            .map(PathBuf::from)
+            .expect("KRAKEN_TEST_CLIP is required");
+        let temp = std::env::temp_dir();
+        let pid = std::process::id();
+        let input = temp.join(format!("kraken-fp-in-{pid}.mkv"));
+
+        let status = quiet(&mut Command::new(media::ffmpeg()))
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&source)
+            .args(["-t", "0.5", "-an", "-c:v", "ffv1"])
+            .arg(&input)
+            .status()
+            .expect("create fp test clip");
+        assert!(status.success());
+
+        let clip = media::probe(&input).expect("probe clip");
+        let model = upscale::registry()
+            .into_iter()
+            .find(|entry| entry.name.contains("UltraSharp"))
+            .expect("find UltraSharp");
+
+        let run_one = |fp16: bool, tag: &str| {
+            let out_path = temp.join(format!("kraken-fp-{tag}-{pid}.mp4"));
+            let _ = std::fs::remove_file(&out_path);
+            let mut up = Upscaler::load(&model, fp16).expect("load model");
+            assert_eq!(up.provider, "CUDA");
+            let spec = ExportSpec {
+                clip: clip.clone(),
+                model: model.clone(),
+                target_scale: 2,
+                strength: 1.0,
+                detail_limit: 1.0,
+                source_treatment: media::SourceTreatment::default(),
+                match_color: true,
+                stability: false,
+                lock_strength: 0.0,
+                cut_detect: 0.4,
+                interpolation_fps: None,
+                fp16,
+                tile: crate::recommended_tile(),
+                out_path: out_path.clone(),
+                codec: "h264_nvenc".into(),
+                cq: 19,
+            };
+            let wall = std::time::Instant::now();
+            let stages = run(
+                &spec,
+                &mut up,
+                None,
+                spec.tile,
+                16,
+                Arc::new(AtomicBool::new(false)),
+                &mut |_, _| {},
+            )
+            .expect("export");
+            println!("{tag}: {}", stages.summary(wall.elapsed()));
+            let _ = std::fs::remove_file(&out_path);
+        };
+
+        // Run fp32 first: whichever runs first pays any residual driver
+        // warm-up, so putting fp16 second is the pessimistic ordering for the
+        // result being claimed.
+        run_one(false, "fp32");
+        run_one(true, "fp16");
+
+        let _ = std::fs::remove_file(input);
+    }
+
     /// Phase 0 of ENHANCEMENTS.md: the unlocked reference export.
     ///
     /// Prints the per-stage breakdown so the temporal lock has something

@@ -835,6 +835,60 @@ mod tests {
         assert_eq!(lock(&a, &b, &motion, 0.0, 1.0).rgb, b.rgb);
     }
 
+    /// The no-cut-ghosting half of the Phase 1 acceptance bar.
+    ///
+    /// `assets/hardcut-test.mp4` is two unrelated clips spliced together, so
+    /// there is exactly one hard edit at a known position. Neither of the
+    /// original test clips contains a cut, which left this path exercised only
+    /// by synthetic solid-colour frames.
+    ///
+    /// Needs no GPU — flow and cut detection are CPU work.
+    #[test]
+    fn hard_cut_releases_the_lock_on_real_footage() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/hardcut-test.mp4");
+        if !path.is_file() {
+            panic!("missing test asset: {}", path.display());
+        }
+        let clip = crate::media::probe(&path).expect("probe cut clip");
+        let step = 1.0 / clip.fps.max(1.0);
+        let count = clip.frames.min(20).max(2);
+
+        let frames: Vec<Frame> = (0..count)
+            .map(|i| {
+                crate::media::frame_at(&clip, i as f64 * step, None)
+                    .unwrap_or_else(|e| panic!("decode frame {i}: {e}"))
+            })
+            .collect();
+
+        let mut cuts = Vec::new();
+        for i in 1..frames.len() {
+            let motion = analyze(&frames[i - 1], &frames[i]).expect("analyze");
+            if motion.cut {
+                cuts.push(i);
+                assert_eq!(
+                    motion.mean_confidence(),
+                    0.0,
+                    "a cut must zero confidence everywhere, pair {i}"
+                );
+
+                // And the blend must pass fresh detail through untouched, so
+                // nothing from the previous shot bleeds across the edit.
+                let locked = lock(&frames[i - 1], &frames[i], &motion, 1.0, 1.0);
+                assert_eq!(
+                    locked.rgb, frames[i].rgb,
+                    "detail was carried across a cut at pair {i}"
+                );
+            }
+        }
+
+        assert_eq!(
+            cuts.len(),
+            1,
+            "expected exactly one hard cut, found {cuts:?}"
+        );
+    }
+
     /// Real footage, which is the only measurement that decides whether the
     /// built-in estimator is good enough to keep.
     ///
