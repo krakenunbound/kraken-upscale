@@ -50,10 +50,13 @@ Import button.
   cap, and CPU post-processing is parallelized.
 - Source profile deinterlacing/restoration and source-color matching are active
   in both preview and export.
+- Genuine RIFE interpolation is active at 48/60/120 fps through a drop-in ONNX
+  timestep model, with hard-cut protection and color correction in preview and
+  export.
 - Clear Video and Clear Queue are available independently; new previews defer
   while an export owns the GPU.
-- Stability, grain preservation, and frame interpolation remain clearly
-  labelled and disabled instead of implying an active pipeline.
+- Stability and grain preservation remain clearly labelled and disabled
+  instead of implying an active pipeline.
 - The slide-out dock is covered by an automated width/animation test.
 
 ## Next product work

@@ -535,6 +535,7 @@ export component SectionHeader inherits Rectangle {
     in property <string> title;
     in property <bool> gated: true;
     in-out property <bool> enabled: false;
+    in property <bool> interactive: true;
     in-out property <bool> expanded: false;
     callback toggled(bool);
 
@@ -559,6 +560,7 @@ export component SectionHeader inherits Rectangle {
             width: root.gated ? 15px : 0px;
             Check {
                 visible: root.gated;
+                enabled: root.interactive;
                 checked <=> root.enabled;
                 toggled(v) => {
                     root.toggled(v);

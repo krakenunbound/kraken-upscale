@@ -4,6 +4,7 @@
 # Downloaded/generated model payloads; keep models/models.json metadata.
 /models/*.onnx
 /models/*.pth
+/models/interpolation/*.onnx
 
 # Redistributable runtime payloads are staged for packaging, not source control.
 /cuda/

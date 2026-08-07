@@ -484,8 +484,25 @@ audio remux as a complete chain.
 | Performance pass | 896px RTX 3090 profile and parallel post-processing landed; batching/TensorRT remain |
 | Export cancel button | **Complete** — stops the active batch and removes partial output |
 | Auto tile size checkbox | **Complete** — persisted and VRAM-aware |
-| Frame interpolation (RIFE) | Planned and clearly disabled |
-| Stability / Source controls | Planned and clearly disabled until their pipelines exist |
+| Frame interpolation (RIFE) | **Complete** — native CUDA ONNX stage, arbitrary 48/60/120 fps, cut protection |
+| Stability controls | Planned and clearly disabled until the temporal-lock pipeline exists |
+
+### RIFE deployment
+
+Frame interpolation uses the MIT-licensed `RIFE_fp32_timestep.onnx` graph from
+`walterlow/RIFE_fp32_timestep`, pinned by revision and SHA-256 in
+`models/interpolation/README.md`. It accepts two RGB frames and a scalar phase,
+so non-integer conversions such as 24→60 fps are evaluated directly rather
+than recursively. The app loads the unmodified download through its existing
+CUDA provider from `models/interpolation/`; no preparation tool is involved.
+
+RIFE runs before detail upscaling to keep the interpolation graph at source
+resolution. Hard cuts select an endpoint instead of generating a morphed
+transition. With Color Match enabled, the generated frame is matched first to
+the corresponding source-frame blend and again after detail upscaling. The
+full-size 704×1248 RIFE pass plus color correction measured 0.31 seconds on the
+target RTX 3090; the extra detail-upscale frames remain the larger cost of a
+higher output frame rate.
 
 ### Where things live
 

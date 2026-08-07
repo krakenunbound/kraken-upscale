@@ -18,6 +18,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+use crate::interpolate::{self, Rife};
 use crate::media::{self, ClipInfo, Frame};
 use crate::upscale::{self, Upscaler};
 
@@ -30,6 +31,7 @@ pub struct ExportSpec {
     pub detail_limit: f32,
     pub source_treatment: media::SourceTreatment,
     pub match_color: bool,
+    pub interpolation_fps: Option<u32>,
     pub fp16: bool,
     pub tile: u32,
     pub out_path: PathBuf,
@@ -53,6 +55,35 @@ impl ExportSpec {
             even(self.clip.height.saturating_mul(self.target_scale)),
         )
     }
+
+    pub fn output_fps(&self) -> u32 {
+        self.interpolation_fps
+            .filter(|fps| *fps as f64 > self.clip.fps)
+            .unwrap_or_else(|| self.clip.fps.round().max(1.0) as u32)
+    }
+
+    pub fn output_fps_rate(&self) -> String {
+        match self
+            .interpolation_fps
+            .filter(|fps| *fps as f64 > self.clip.fps)
+        {
+            Some(fps) => format!("{fps}/1"),
+            None if !self.clip.fps_rate.is_empty() => self.clip.fps_rate.clone(),
+            None => "24/1".into(),
+        }
+    }
+
+    pub fn output_frames(&self) -> u64 {
+        match self
+            .interpolation_fps
+            .filter(|fps| *fps as f64 > self.clip.fps)
+        {
+            Some(fps) if self.clip.duration > 0.0 => {
+                (self.clip.duration * fps as f64).round().max(1.0) as u64
+            }
+            _ => self.clip.frames.max(1),
+        }
+    }
 }
 
 fn quiet(cmd: &mut Command) -> &mut Command {
@@ -75,11 +106,7 @@ fn spawn_decoder(clip: &ClipInfo, treatment: media::SourceTreatment) -> Result<C
 
 fn spawn_encoder(spec: &ExportSpec) -> Result<Child, String> {
     let (w, h) = spec.output_size();
-    let fps = if spec.clip.fps_rate.is_empty() {
-        "24/1"
-    } else {
-        spec.clip.fps_rate.as_str()
-    };
+    let fps = spec.output_fps_rate();
 
     let mut cmd = Command::new(media::ffmpeg());
     // Never replace a file behind the user's back. Output paths are made
@@ -94,7 +121,7 @@ fn spawn_encoder(spec: &ExportSpec) -> Result<Child, String> {
         "-s",
         &format!("{w}x{h}"),
         "-r",
-        fps,
+        &fps,
         "-i",
         "pipe:0",
     ]);
@@ -165,6 +192,7 @@ fn remove_partial(path: &std::path::Path) {
 pub fn run(
     spec: &ExportSpec,
     up: &mut Upscaler,
+    mut rife: Option<&mut Rife>,
     tile: u32,
     overlap: u32,
     cancel: Arc<AtomicBool>,
@@ -172,7 +200,7 @@ pub fn run(
 ) -> Result<(), String> {
     let (sw, sh) = (spec.clip.width, spec.clip.height);
     let frame_bytes = (sw as usize) * (sh as usize) * 3;
-    let total = spec.clip.frames.max(1);
+    let total = spec.output_frames();
 
     let mut decoder = spawn_decoder(&spec.clip, spec.source_treatment)?;
     let mut decoder_err = decoder.stderr.take().map(drain);
@@ -206,32 +234,21 @@ pub fn run(
     let mut nothing = |_: u32, _: u32| {};
 
     let processing = (|| -> Result<(), String> {
-        loop {
+        let mut process_frame = |source: &Frame| -> Result<(), String> {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-
-            if !read_frame(&mut src_out, &mut buf)? {
-                break;
-            }
-
-            let source = Frame {
-                width: sw,
-                height: sh,
-                rgb: std::mem::replace(&mut buf, vec![0u8; frame_bytes]),
-            };
-
-            let out = up.run(&source, tile, overlap, &mut nothing)?;
+            let out = up.run(source, tile, overlap, &mut nothing)?;
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
             let colored = if spec.match_color {
-                upscale::match_color_to_source(&out, &source)
+                upscale::match_color_to_source(&out, source)
             } else {
                 out
             };
-            let limited = upscale::clamp_deviation(&colored, &source, spec.detail_limit * 255.0);
-            let blended = upscale::blend_toward_source(&limited, &source, spec.strength);
+            let limited = upscale::clamp_deviation(&colored, source, spec.detail_limit * 255.0);
+            let blended = upscale::blend_toward_source(&limited, source, spec.strength);
             let (ow, oh) = spec.output_size();
             let final_frame = upscale::resample(&blended, ow, oh);
 
@@ -241,6 +258,68 @@ pub fn run(
 
             done += 1;
             on_progress(done, total);
+            Ok(())
+        };
+
+        let mut read_source = || -> Result<Option<Frame>, String> {
+            if !read_frame(&mut src_out, &mut buf)? {
+                return Ok(None);
+            }
+            Ok(Some(Frame {
+                width: sw,
+                height: sh,
+                rgb: std::mem::replace(&mut buf, vec![0u8; frame_bytes]),
+            }))
+        };
+
+        if let Some(target_fps) = spec
+            .interpolation_fps
+            .filter(|fps| *fps as f64 > spec.clip.fps)
+        {
+            let rife = rife.as_deref_mut().ok_or_else(|| {
+                "frame interpolation was enabled but RIFE was not loaded".to_string()
+            })?;
+            let Some(mut left) = read_source()? else {
+                return Err("decoder produced no frames".into());
+            };
+            let source_fps = spec.clip.fps.max(1.0);
+            let target_fps = target_fps as f64;
+            let mut source_index = 0u64;
+            let mut output_index = 0u64;
+
+            while let Some(right) = read_source()? {
+                let interval_end = (source_index + 1) as f64 / source_fps;
+                while output_index < total && output_index as f64 / target_fps < interval_end - 1e-9
+                {
+                    let output_time = output_index as f64 / target_fps;
+                    let phase =
+                        ((output_time * source_fps) - source_index as f64).clamp(0.0, 1.0) as f32;
+                    if phase <= 0.0001 {
+                        process_frame(&left)?;
+                    } else {
+                        let mut generated = rife.run(&left, &right, phase)?;
+                        if spec.match_color && !interpolate::is_scene_cut(&left, &right) {
+                            let reference = interpolate::color_reference(&left, &right, phase);
+                            generated = upscale::match_color_to_source(&generated, &reference);
+                        }
+                        process_frame(&generated)?;
+                    }
+                    output_index += 1;
+                }
+                left = right;
+                source_index += 1;
+            }
+
+            // Preserve the source duration without inventing motion beyond the
+            // last available pair.
+            while output_index < total {
+                process_frame(&left)?;
+                output_index += 1;
+            }
+        } else {
+            while let Some(source) = read_source()? {
+                process_frame(&source)?;
+            }
         }
         Ok(())
     })();
@@ -318,6 +397,7 @@ mod tests {
             detail_limit: 1.0,
             source_treatment: media::SourceTreatment::default(),
             match_color: true,
+            interpolation_fps: None,
             fp16: false,
             tile: 256,
             out_path: PathBuf::from("output.mp4"),
@@ -341,5 +421,76 @@ mod tests {
 
         let mut partial = std::io::Cursor::new(vec![1u8; 5]);
         assert!(read_frame(&mut partial, &mut frame).is_err());
+    }
+
+    #[test]
+    #[ignore = "set KRAKEN_TEST_CLIP to verify the real CUDA RIFE export stage"]
+    fn exports_real_rife_sequence() {
+        let _ = crate::cuda::prepare();
+        let source = std::env::var_os("KRAKEN_TEST_CLIP")
+            .map(PathBuf::from)
+            .expect("KRAKEN_TEST_CLIP is required");
+        let temp = std::env::temp_dir();
+        let input = temp.join(format!("kraken-rife-input-{}.mkv", std::process::id()));
+        let output = temp.join(format!("kraken-rife-output-{}.mp4", std::process::id()));
+        let status = quiet(&mut Command::new(media::ffmpeg()))
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&source)
+            .args([
+                "-t",
+                "0.25",
+                "-vf",
+                "scale=176:312:flags=lanczos,fps=24",
+                "-an",
+                "-c:v",
+                "ffv1",
+            ])
+            .arg(&input)
+            .status()
+            .expect("create short RIFE test clip");
+        assert!(status.success());
+
+        let clip = media::probe(&input).expect("probe short RIFE clip");
+        let model = upscale::registry()
+            .into_iter()
+            .find(|entry| entry.name == "RealESRGAN_x2")
+            .expect("find native 2x detail model");
+        let mut up = Upscaler::load(&model, true).expect("load detail model");
+        assert_eq!(up.provider, "CUDA");
+        let mut rife = Rife::load().expect("load RIFE model");
+        let spec = ExportSpec {
+            clip,
+            model,
+            target_scale: 2,
+            strength: 1.0,
+            detail_limit: 1.0,
+            source_treatment: media::SourceTreatment::default(),
+            match_color: true,
+            interpolation_fps: Some(60),
+            fp16: true,
+            tile: 256,
+            out_path: output.clone(),
+            codec: "h264_nvenc".into(),
+            cq: 23,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        run(
+            &spec,
+            &mut up,
+            Some(&mut rife),
+            256,
+            16,
+            cancel,
+            &mut |_, _| {},
+        )
+        .expect("export interpolated test clip");
+
+        let result = media::probe(&output).expect("probe interpolated output");
+        assert!((result.fps - 60.0).abs() < 0.01);
+        assert_eq!(result.frames, spec.output_frames());
+        assert_eq!((result.width, result.height), spec.output_size());
+
+        let _ = std::fs::remove_file(input);
+        let _ = std::fs::remove_file(output);
     }
 }

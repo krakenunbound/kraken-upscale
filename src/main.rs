@@ -13,6 +13,7 @@ mod cuda;
 mod dnd;
 mod export;
 mod gpu;
+mod interpolate;
 mod media;
 mod pth;
 mod settings;
@@ -56,6 +57,7 @@ struct Job {
     detail_limit: f32,
     source_treatment: media::SourceTreatment,
     match_color: bool,
+    interpolation_fps: Option<u32>,
     fp16: bool,
     tile: u32,
 }
@@ -66,6 +68,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let cuda_dir = cuda::prepare();
 
     let ui = MainWindow::new()?;
+    ui.set_interp_available(interpolate::available());
     ui.set_tasks(ModelRc::new(VecModel::<TaskRow>::from(Vec::new())));
     ui.set_log_lines(ModelRc::new(VecModel::<slint::SharedString>::from(
         Vec::new(),
@@ -168,7 +171,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_stability_on(saved.stability);
     ui.set_lock(saved.lock);
     ui.set_cut_detect(saved.cut_detect);
-    ui.set_interp_on(saved.interp_enabled);
+    ui.set_interp_on(saved.interp_enabled && interpolate::available());
     ui.set_interp_index(saved.interp_index);
     ui.set_dock_panel(saved.dock_panel);
     ui.set_view_mode(saved.view_mode);
@@ -177,6 +180,23 @@ fn main() -> Result<(), slint::PlatformError> {
         &logger,
         format!("persistent activity log: {}", activity_log_path().display()),
     );
+    if interpolate::available() {
+        log(
+            &logger,
+            format!(
+                "RIFE interpolation model: {}",
+                interpolate::model_path().display()
+            ),
+        );
+    } else {
+        log(
+            &logger,
+            format!(
+                "RIFE interpolation unavailable: {} is missing",
+                interpolate::model_path().display()
+            ),
+        );
+    }
 
     let clip: Rc<RefCell<Option<media::ClipInfo>>> = Rc::new(RefCell::new(None));
     let preview_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -199,14 +219,33 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             ui.set_model_note(upscale::guidance(&model.name).into());
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
+            let interpolation_fps = ui
+                .get_interp_on()
+                .then(|| interpolate::target_fps(ui.get_interp_index()));
+
+            if let Some(fps) = interpolation_fps {
+                if fps as f64 <= info.fps {
+                    ui.set_preview_status(
+                        format!("choose an interpolation target above {:.2} fps", info.fps).into(),
+                    );
+                    return;
+                }
+                if !interpolate::available() {
+                    ui.set_preview_status("RIFE model missing — interpolation unavailable".into());
+                    return;
+                }
+            }
 
             let at_secs = ui.get_playhead().clamp(0.0, 1.0) as f64 * info.duration;
             ui.set_out_badge(
                 format!(
-                    "{} × {} · {}",
+                    "{} × {} · {}{}",
                     info.width * target_scale,
                     info.height * target_scale,
-                    model.name
+                    model.name,
+                    interpolation_fps
+                        .map(|fps| format!(" · {fps} fps RIFE"))
+                        .unwrap_or_default()
                 )
                 .into(),
             );
@@ -241,6 +280,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     deinterlace: ui.get_detect_fields(),
                 },
                 match_color: ui.get_match_color(),
+                interpolation_fps,
                 fp16: ui.get_fp16(),
                 tile: if ui.get_auto_tile() {
                     auto_tile_size
@@ -417,15 +457,35 @@ fn main() -> Result<(), slint::PlatformError> {
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
             let strength = ui.get_strength();
             let detail_limit = ui.get_detail_limit();
+            let interpolation_fps = ui
+                .get_interp_on()
+                .then(|| interpolate::target_fps(ui.get_interp_index()));
+            if let Some(fps) = interpolation_fps {
+                if fps as f64 <= info.fps {
+                    ui.set_preview_status(
+                        format!("choose an interpolation target above {:.2} fps", info.fps).into(),
+                    );
+                    return;
+                }
+                if !interpolate::available() {
+                    ui.set_preview_status("RIFE model missing — task not added".into());
+                    log(&ui.as_weak(), "task rejected: RIFE interpolation model is missing");
+                    return;
+                }
+            }
 
             let stem = info
                 .path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "output".into());
-            let candidate = info
-                .path
-                .with_file_name(format!("{stem}_{target_scale}x_{}.mp4", model.name));
+            let fps_suffix = interpolation_fps
+                .map(|fps| format!("_{fps}fps"))
+                .unwrap_or_default();
+            let candidate = info.path.with_file_name(format!(
+                "{stem}_{target_scale}x_{}{fps_suffix}.mp4",
+                model.name
+            ));
             let out_path = unique_output_path(&candidate, &queue.borrow());
 
             let spec = export::ExportSpec {
@@ -440,6 +500,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     deinterlace: ui.get_detect_fields(),
                 },
                 match_color: ui.get_match_color(),
+                interpolation_fps,
                 fp16: ui.get_fp16(),
                 tile: if ui.get_auto_tile() {
                     auto_tile_size
@@ -455,8 +516,10 @@ fn main() -> Result<(), slint::PlatformError> {
             let row = TaskRow {
                 name: info.file_name().into(),
                 detail: format!(
-                    "{ow}×{oh} · {} · str {strength:.2} · lim {detail_limit:.2} · {} frames",
-                    model.name, info.frames
+                    "{ow}×{oh} · {} · {} fps · str {strength:.2} · lim {detail_limit:.2} · {} frames",
+                    model.name,
+                    spec.output_fps(),
+                    spec.output_frames()
                 )
                 .into(),
                 status: "queued".into(),
@@ -614,6 +677,7 @@ fn spawn_preview_worker(
 
     std::thread::spawn(move || {
         let mut loaded: Option<(String, bool, upscale::Upscaler)> = None;
+        let mut rife_model: Option<interpolate::Rife> = None;
 
         while let Ok(job) = rx.recv() {
             // Drain to the newest request — scrubbing and dragging sliders
@@ -629,9 +693,9 @@ fn spawn_preview_worker(
 
             let started = std::time::Instant::now();
 
-            let source =
-                match media::frame_at_with(&job.clip, job.at_secs, None, job.source_treatment) {
-                    Ok(f) => f,
+            let (source, interpolation_note) =
+                match decode_preview_source(&job, &mut rife_model, &handle) {
+                    Ok(result) => result,
                     Err(e) => {
                         log(&handle, format!("preview source processing failed: {e}"));
                         report_current(
@@ -821,6 +885,12 @@ fn spawn_preview_worker(
 
                     let secs = started.elapsed().as_secs_f32();
                     let mut notes = Vec::new();
+                    if let Some(note) = interpolation_note {
+                        notes.push(note);
+                    }
+                    if job.match_color {
+                        notes.push("color matched".into());
+                    }
                     if job.strength < 0.999 {
                         notes.push(format!("strength {:.2}", job.strength));
                     }
@@ -869,6 +939,72 @@ fn spawn_preview_worker(
     tx
 }
 
+fn decode_preview_source(
+    job: &Job,
+    rife_model: &mut Option<interpolate::Rife>,
+    handle: &slint::Weak<MainWindow>,
+) -> Result<(media::Frame, Option<String>), String> {
+    let Some(target_fps) = job
+        .interpolation_fps
+        .filter(|fps| *fps as f64 > job.clip.fps)
+    else {
+        return media::frame_at_with(&job.clip, job.at_secs, None, job.source_treatment)
+            .map(|frame| (frame, None));
+    };
+
+    if job.clip.frames < 2 {
+        return media::frame_at_with(&job.clip, job.at_secs, None, job.source_treatment)
+            .map(|frame| (frame, Some(format!("RIFE {target_fps} fps · single frame"))));
+    }
+
+    let position = job.at_secs.max(0.0) * job.clip.fps.max(1.0);
+    let pair = (position.floor() as u64).min(job.clip.frames.saturating_sub(2));
+    let exact_phase = (position - pair as f64).clamp(0.0, 1.0) as f32;
+    // Timeline positions commonly land exactly on a source frame. Showing the
+    // midpoint there makes enabling RIFE produce a real, visible preview.
+    let phase = if !(0.001..=0.999).contains(&exact_phase) {
+        0.5
+    } else {
+        exact_phase
+    };
+    let left = media::frame_at_with(
+        &job.clip,
+        pair as f64 / job.clip.fps,
+        None,
+        job.source_treatment,
+    )?;
+    let right = media::frame_at_with(
+        &job.clip,
+        (pair + 1) as f64 / job.clip.fps,
+        None,
+        job.source_treatment,
+    )?;
+
+    if rife_model.is_none() {
+        log(handle, "preview: loading RIFE timestep model on CUDA");
+        let rife = interpolate::Rife::load()?;
+        log(
+            handle,
+            format!("loaded RIFE interpolation model on {}", rife.provider),
+        );
+        *rife_model = Some(rife);
+    }
+    let rife = rife_model
+        .as_mut()
+        .ok_or_else(|| "RIFE model did not remain loaded".to_string())?;
+    let cut = interpolate::is_scene_cut(&left, &right);
+    let mut generated = rife.run(&left, &right, phase)?;
+    if job.match_color && !cut {
+        let reference = interpolate::color_reference(&left, &right, phase);
+        generated = upscale::match_color_to_source(&generated, &reference);
+    }
+
+    Ok((
+        generated,
+        Some(format!("RIFE {target_fps} fps · t={phase:.2}")),
+    ))
+}
+
 /// Runs full-clip exports off the UI thread.
 fn spawn_exporter(
     handle: slint::Weak<MainWindow>,
@@ -878,6 +1014,7 @@ fn spawn_exporter(
 
     std::thread::spawn(move || {
         let mut loaded: Option<(String, bool, upscale::Upscaler)> = None;
+        let mut rife_model: Option<interpolate::Rife> = None;
 
         while let Ok(batch) = rx.recv() {
             let cancel = Arc::new(AtomicBool::new(false));
@@ -928,6 +1065,38 @@ fn spawn_exporter(
                     continue;
                 }
 
+                if spec.interpolation_fps.is_some() && rife_model.is_none() {
+                    set_task(&handle, idx, 0.0, "loading RIFE", true, false);
+                    match interpolate::Rife::load() {
+                        Ok(rife) => {
+                            log(
+                                &handle,
+                                format!("export: loaded RIFE interpolation on {}", rife.provider),
+                            );
+                            rife_model = Some(rife);
+                        }
+                        Err(e) => {
+                            log(&handle, format!("export: RIFE load failed: {e}"));
+                            set_task(&handle, idx, 0.0, "RIFE failed", false, true);
+                            continue;
+                        }
+                    }
+                }
+
+                log(
+                    &handle,
+                    format!(
+                        "export started: {} · {} frames at {} fps{} · color match {}",
+                        spec.clip.file_name(),
+                        spec.output_frames(),
+                        spec.output_fps(),
+                        spec.interpolation_fps
+                            .map(|_| " · RIFE")
+                            .unwrap_or_default(),
+                        if spec.match_color { "on" } else { "off" }
+                    ),
+                );
+
                 let started = std::time::Instant::now();
                 let progress_handle = handle.clone();
                 let mut on_progress = move |done: u64, total: u64| {
@@ -969,6 +1138,7 @@ fn spawn_exporter(
                 match export::run(
                     &spec,
                     up,
+                    rife_model.as_mut(),
                     spec.tile,
                     OVERLAP,
                     cancel.clone(),

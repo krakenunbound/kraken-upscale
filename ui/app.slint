@@ -59,6 +59,7 @@ export component MainWindow inherits Window {
     in-out property <float> cut-detect: 0.4;
     in-out property <bool> interp-on: false;
     in-out property <int> interp-index: 1;
+    in property <bool> interp-available: false;
     in property <image> frame-before;
     in property <image> frame-after;
     in property <image> thumb;
@@ -1535,10 +1536,13 @@ export component MainWindow inherits Window {
 
                                 // ── Frame interpolation ─────────────────
                                 fi-hdr := SectionHeader {
-                                    title: "Frame Interpolation — planned";
-                                    gated: false;
-                                    enabled: false;
+                                    title: root.interp-available ? "Frame Interpolation — RIFE"
+                                        : "Frame Interpolation — model missing";
+                                    gated: true;
+                                    enabled <=> root.interp-on;
+                                    interactive: root.interp-available;
                                     expanded <=> root.fi-open;
+                                    toggled(v) => { root.settings-changed(); }
                                 }
 
                                 if root.fi-open: VerticalLayout {
@@ -1547,18 +1551,20 @@ export component MainWindow inherits Window {
                                     padding-bottom: 10px;
                                     spacing: 9px;
 
+                                    Help {
+                                        lines: 3;
+                                        text: root.interp-available
+                                            ? "RIFE synthesizes motion-aware frames between source frames. It runs before detail upscaling and increases export time with the chosen frame rate."
+                                            : "Add RIFE_fp32_timestep.onnx to models/interpolation and restart the app.";
+                                    }
+
                                     FieldRow {
                                         text: "Target";
                                         current <=> root.interp-index;
-                                        enabled: false;
-                                        accent: false;
+                                        enabled: root.has-clip && root.interp-on && root.interp-available;
+                                        accent: root.interp-on;
                                         items: ["48 fps", "60 fps", "120 fps"];
                                         changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    CheckRow {
-                                        text: "Slow motion (keeps source fps)";
-                                        enabled: false;
                                     }
                                 }
 
@@ -1580,7 +1586,7 @@ export component MainWindow inherits Window {
 
                                     CheckRow {
                                         text: "Match to source";
-                                        hint: "Corrects any color drift the model introduces.";
+                                        hint: "Corrects color drift from both RIFE interpolation and detail upscaling.";
                                         checked <=> root.match-color;
                                         enabled: root.has-clip;
                                         toggled(v) => { root.settings-changed(); }

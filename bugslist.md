@@ -21,7 +21,7 @@ Last updated: 2026-08-06
 - [x] B5 — decoder and encoder diagnostics are continuously drained
 - [x] B6 — beside-app `models/` discovery no longer requires an index file
 - [x] B7 / B8 / B20 — queue scheduling skips finished/running jobs and blocks duplicates
-- [x] B10 / B11 / B13 / B18 — misleading or inactive controls are honest and disabled
+- [x] B10 / B11 / B13 / B18 — controls either run real processing or are honest and disabled
 - [x] B12 — automatic tile size is real, persisted, and VRAM-aware
 - [x] B14 — timing uses an explicit rational CFR policy
 - [x] B15 — non-square-pixel sources are normalized to display geometry
@@ -37,6 +37,7 @@ Last updated: 2026-08-06
 - [x] B28 — current video and export queue can be cleared independently
 - [x] B29 — every selectable Source Restore filter runs in the bundled video engine
 - [x] B30 — automatic tiles are capped safely for native 8x models
+- [x] B31 — Frame Interpolation runs a genuine RIFE model in preview and export
 
 All confirmed defects in this audit are closed. Native folder-drop loading is
 also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
@@ -125,6 +126,9 @@ also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
 - **Where:** Source (content / restore / detect fields / preserve grain); Stability (lock / cut detect); Frame Interpolation; Color
 - **What:** Values persist in settings but never enter the preview or export pipeline. Documented as open work in DECISIONS §13, but were presented as interactive controls without clear planned/unavailable labels.
 - **Impact:** False confidence that preprocessing / temporal lock / RIFE are running.
+- **Resolution:** Source profiles, restoration, Color Match, and RIFE now enter
+  both preview and export. Stability and grain preservation remain visibly
+  labelled as planned and cannot be enabled.
 
 ### B14 — Frame rate probe uses `r_frame_rate` only
 - **Where:** `src/media.rs` (`probe`)
@@ -245,6 +249,15 @@ also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
   or below 4096px. The RTX 3090 retains the measured 896px tile for 2x/4x
   models, while an 8x model is safely capped at 512px.
 
+### B31 — Frame Interpolation settings did not process frames
+- **Where:** `src/interpolate.rs`, `src/export.rs`, `src/main.rs`, `ui/app.slint`
+- **Resolution:** Added an unmodified drop-in RIFE timestep ONNX model and a
+  native CUDA inference stage. Preview renders a genuine between-frame sample;
+  export schedules exact phases for 48/60/120 fps, including non-integer
+  24→60 conversion, hard-cut protection, frame accounting, and color matching.
+- **Verification:** A real 24→60 export completed through RIFE, Color Match,
+  detail upscaling, and NVENC with the expected output rate and frame count.
+
 ---
 
 ## Not bugs (known open work / by design)
@@ -258,7 +271,6 @@ These are intentional or documented unfinished work, not silent defects:
 | Source preprocessing | Deinterlace/deblock/compression cleanup active; IVTC and grain remain |
 | Scale by target format (HD/4K) | Designed in DECISIONS §7 |
 | Performance (tile size, batching, TensorRT, model-scale match) | Known; not correctness bugs |
-| Frame interpolation (RIFE) | UI only — listed as B13 when it misleads |
 | LGPL ffmpeg → NVENC only, no libx264 | By design |
 | AV1 NVENC fails on Ampere (3090) | Hardware limit, documented |
 

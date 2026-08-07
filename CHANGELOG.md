@@ -37,6 +37,10 @@
   engine and added execution coverage for all four selector values.
 - Added real source-color matching with bounded per-channel mean/contrast
   correction in preview and export.
+- Added a genuine RIFE timestep stage using a drop-in MIT-licensed ONNX model.
+  It synthesizes motion-aware frames before detail upscaling at 48, 60, or
+  120 fps, skips interpolation across detected hard cuts, and color-matches
+  generated frames to their source-frame blend when Color Match is enabled.
 - Probed both average and nominal frame rates and retained the selected rational
   rate throughout decode and encode.
 - Added explicit conversion to constant frame rate for the raw-frame pipeline.
@@ -67,8 +71,10 @@
   status.
 - Replaced the inaccurate half-precision performance promise with neutral copy.
 - Made automatic tile sizing real, persisted, and VRAM-aware.
-- Marked Source, Stability, Color, and Frame Interpolation as planned and
-  disabled their controls until their pipelines exist.
+- Kept Stability and grain preservation visibly planned and disabled until
+  their pipelines exist.
+- Activated the Frame Interpolation controls only when the RIFE model is
+  present, and included target FPS/frame count in queued task details and logs.
 - Made the fixed export-format footer visibly non-interactive.
 - Changed unknown model scale display from `0×` to `auto`.
 
@@ -81,6 +87,10 @@
   parallelized color, blend, clamp, and resampling work across CPU cores.
 - Made tiles scale-aware so native 8x models stay within a safe 4096px output
   pitch while 2x/4x models still benefit from larger tiles.
+- Verified a real arbitrary-timestep 24→60 fps export through RIFE, color
+  matching, detail upscaling, and NVENC, including output FPS and frame count.
+- Measured full-size RIFE inference plus color correction at 0.31 seconds for a
+  704×1248 frame pair on the target RTX 3090.
 - Added tests for odd-dimension output sizing, exact EOF, truncated frame input,
   anamorphic media normalization, frame decoding, and dock width animation.
 - Verified direct import and inference with unchanged RealESRGAN 2×/4×,

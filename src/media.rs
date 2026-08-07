@@ -236,6 +236,7 @@ pub fn probe(path: &std::path::Path) -> Result<ClipInfo, String> {
 }
 
 /// A decoded frame as tightly packed rgb24.
+#[derive(Clone)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
