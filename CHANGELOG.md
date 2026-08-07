@@ -39,6 +39,13 @@
 
 ### Interface and lifecycle
 
+- Made missing GPU runtime a visible blocking state instead of silently starting
+  an impractically slow CPU preview.
+- Added preview start, model-load, per-tile progress/ETA, completion, and failure
+  entries to the activity log.
+- Mirrored activity entries to a persistent `activity.log` beside the saved
+  settings so a failed or stalled session remains diagnosable after restart.
+- Normalized unavailable sample-aspect metadata without showing a false warning.
 - Replaced the conflicting legacy file-drop hook with the window framework's
   native Explorer drop events and added whole-stage hover feedback.
 - Corrected compounding preview pan movement in split and side-by-side modes.

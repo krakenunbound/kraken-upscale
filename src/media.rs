@@ -151,13 +151,14 @@ pub fn probe(path: &std::path::Path) -> Result<ClipInfo, String> {
     let fps = fps_num as f64 / fps_den as f64;
     let fps_rate = format!("{fps_num}/{fps_den}");
 
-    let sample_aspect_ratio = field("sample_aspect_ratio").unwrap_or_else(|| "1:1".into());
-    let sar = sample_aspect_ratio
+    let reported_sar = field("sample_aspect_ratio").unwrap_or_else(|| "1:1".into());
+    let parsed_sar = reported_sar
         .split_once(':')
         .and_then(|(n, d)| Some((n.parse::<f64>().ok()?, d.parse::<f64>().ok()?)))
-        .filter(|(n, d)| *n > 0.0 && *d > 0.0)
-        .map(|(n, d)| n / d)
-        .unwrap_or(1.0);
+        .filter(|(n, d)| *n > 0.0 && *d > 0.0);
+    let (sample_aspect_ratio, sar) = parsed_sar
+        .map(|(n, d)| (reported_sar, n / d))
+        .unwrap_or_else(|| ("1:1".into(), 1.0));
     // Use an even square-pixel width so yuv420p/NVENC always has valid geometry.
     let mut width = (coded_width as f64 * sar).round().max(2.0) as u32;
     if !width.is_multiple_of(2) {

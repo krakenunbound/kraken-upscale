@@ -33,6 +33,7 @@ Last updated: 2026-08-06
 - [x] B23 — closed as a non-bug after review
 - [x] B24 — clean frame-boundary EOF and truncated-frame EOF are distinguished
 - [x] B26 — Explorer file drops use the native window event stream and show hover feedback
+- [x] B27 — missing GPU runtime no longer appears as an unexplained frozen preview
 
 All confirmed defects in this audit are closed. Native folder-drop loading is
 also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
@@ -210,6 +211,16 @@ also complete for standard RRDBNet `.pth` checkpoints and `.onnx` models.
 - **Resolution:** Listen to the framework's native `DroppedFile`, `HoveredFile`,
   and cancellation events. The empty stage now highlights while a valid file is
   over the window and clears that state on drop or cancellation.
+
+### B27 — CPU fallback looks frozen and the activity log gives no progress
+- **Where:** `src/main.rs` preview worker and runtime status
+- **What:** A full-resolution RRDBNet preview could silently begin on the CPU
+  when the packaged GPU runtime was absent. The status stayed `RUNTIME OK`, and
+  the log stopped after model load while a very long render ran.
+- **Resolution:** Missing GPU support is now a visible blocking state; automatic
+  preview stops rather than starting impractical CPU work. GPU previews log
+  dimensions, model loading, tile progress with elapsed time/ETA, completion,
+  and failures. The same entries persist to `activity.log` across restarts.
 
 ---
 

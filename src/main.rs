@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::cell::RefCell;
+use std::io::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
@@ -67,10 +68,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let logger = ui.as_weak();
     match cuda_dir.as_deref() {
         Some(dir) => log(&logger, format!("CUDA runtime: {}", dir.display())),
-        None => log(
-            &logger,
-            "CUDA runtime not found — inference will run on CPU",
-        ),
+        None => {
+            ui.set_runtime_state("GPU RUNTIME MISSING".into());
+            log(
+                &logger,
+                "GPU runtime missing — preview and export are paused to avoid unusably slow CPU processing",
+            );
+        }
     }
 
     let probe = gpu::probe();
@@ -162,6 +166,10 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_dock_panel(saved.dock_panel);
     ui.set_view_mode(saved.view_mode);
     log(&logger, format!("settings: {}", settings::path().display()));
+    log(
+        &logger,
+        format!("persistent activity log: {}", activity_log_path().display()),
+    );
 
     let clip: Rc<RefCell<Option<media::ClipInfo>>> = Rc::new(RefCell::new(None));
     let tx = spawn_preview_worker(ui.as_weak());
@@ -534,11 +542,36 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                 }
             };
 
+            let step = job.tile.saturating_sub(OVERLAP * 2).max(16);
+            let tiles = source.width.div_ceil(step) * source.height.div_ceil(step);
+            log(
+                &handle,
+                format!(
+                    "preview started: {} at {:.2}s · {}×{} → {}×{} · {} · {}px tiles ({tiles} total)",
+                    job.clip.file_name(),
+                    job.at_secs,
+                    source.width,
+                    source.height,
+                    source.width.saturating_mul(job.target_scale),
+                    source.height.saturating_mul(job.target_scale),
+                    job.model.name,
+                    job.tile,
+                ),
+            );
+
             let stale = loaded
                 .as_ref()
                 .map(|(n, f, _)| n != &job.model.name || *f != job.fp16)
                 .unwrap_or(true);
             if stale {
+                log(
+                    &handle,
+                    format!(
+                        "preview: loading {} ({})",
+                        job.model.name,
+                        if job.fp16 { "fp16 preferred" } else { "fp32" }
+                    ),
+                );
                 match upscale::Upscaler::load(&job.model, job.fp16) {
                     Ok(u) => {
                         log(
@@ -557,6 +590,14 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                         let p = u.provider.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = h.upgrade() {
+                                ui.set_runtime_state(
+                                    if p == "CUDA" {
+                                        "RUNTIME OK"
+                                    } else {
+                                        "CPU FALLBACK"
+                                    }
+                                    .into(),
+                                );
                                 ui.set_rt_provider(p.into());
                             }
                         });
@@ -574,15 +615,42 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                 continue;
             };
 
+            if up.provider != "CUDA" {
+                let message = "GPU runtime unavailable — preview stopped instead of running an impractically slow CPU render";
+                log(&handle, message);
+                report(&handle, message.into(), None);
+                continue;
+            }
+
             // Feed tile progress back so the status bar fills as the frame
             // resolves rather than sitting blank for several seconds.
             let progress_handle = handle.clone();
+            let progress_started = std::time::Instant::now();
             let mut on_progress = move |done: u32, total: u32| {
                 let frac = if total == 0 {
                     0.0
                 } else {
                     done as f32 / total as f32
                 };
+                if done > 0 {
+                    let elapsed = progress_started.elapsed().as_secs_f64();
+                    let finish = if done < total {
+                        format!(
+                            " · {} remaining",
+                            human_duration(elapsed / done as f64 * (total - done) as f64)
+                        )
+                    } else {
+                        " · done".into()
+                    };
+                    log(
+                        &progress_handle,
+                        format!(
+                            "preview: tile {done}/{total} ({:.0}%) · {} elapsed{finish}",
+                            frac * 100.0,
+                            human_duration(elapsed)
+                        ),
+                    );
+                }
                 let h = progress_handle.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = h.upgrade() {
@@ -629,9 +697,13 @@ fn spawn_preview_worker(handle: slint::Weak<MainWindow>) -> Sender<Job> {
                         secs,
                         up.provider
                     );
+                    log(&handle, format!("preview completed: {note}"));
                     report(&handle, note, Some(final_frame));
                 }
-                Err(e) => report(&handle, format!("inference failed: {e}"), None),
+                Err(e) => {
+                    log(&handle, format!("preview failed: {e}"));
+                    report(&handle, format!("inference failed: {e}"), None);
+                }
             }
         }
     });
@@ -689,6 +761,14 @@ fn spawn_exporter(
                 let Some((_, _, up)) = loaded.as_mut() else {
                     continue;
                 };
+                if up.provider != "CUDA" {
+                    log(
+                        &handle,
+                        "export stopped: GPU runtime unavailable; CPU video processing is disabled",
+                    );
+                    set_task(&handle, idx, 0.0, "GPU runtime missing", false, true);
+                    continue;
+                }
 
                 let started = std::time::Instant::now();
                 let progress_handle = handle.clone();
@@ -811,6 +891,10 @@ fn spawn_gpu_monitor(handle: slint::Weak<MainWindow>) {
 /// back the log goes rather than how far forward.
 const LOG_CAPACITY: usize = 400;
 
+fn activity_log_path() -> std::path::PathBuf {
+    settings::path().with_file_name("activity.log")
+}
+
 /// Appends a line to the activity log and mirrors it to stderr.
 ///
 /// Safe to call from any thread — the model touch is marshalled onto the UI
@@ -826,6 +910,18 @@ fn log(handle: &slint::Weak<MainWindow>, msg: impl Into<String>) {
             format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
         })
         .unwrap_or_default();
+
+    let path = activity_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{stamp}  {msg}");
+    }
 
     let handle = handle.clone();
     let _ = slint::invoke_from_event_loop(move || {
