@@ -1481,10 +1481,10 @@ export component MainWindow inherits Window {
 
                                 // ── Stability (the temporal lock) ───────
                                 SectionHeader {
-                                    title: "Stability — planned";
-                                    gated: false;
-                                    enabled: false;
+                                    title: "Stability — temporal lock";
+                                    enabled <=> root.stability-on;
                                     expanded <=> root.stb-open;
+                                    toggled(v) => { root.settings-changed(); }
                                 }
 
                                 if root.stb-open: VerticalLayout {
@@ -1513,22 +1513,30 @@ export component MainWindow inherits Window {
 
                                     SliderRow {
                                         text: "Lock";
-                                        enabled: false;
+                                        enabled: root.stability-on;
                                         value <=> root.lock;
                                         released => { root.settings-changed(); }
                                     }
 
                                     SliderRow {
                                         text: "Cut detect";
-                                        enabled: false;
+                                        enabled: root.stability-on;
                                         value <=> root.cut-detect;
                                         released => { root.settings-changed(); }
                                     }
 
                                     Help {
-                                        lines: 2;
+                                        lines: 3;
                                         text: "Higher Lock is steadier but smears fast motion. "
-                                            + "Cut detect resets the lock at scene changes.";
+                                            + "Held detail is released automatically wherever "
+                                            + "motion cannot be tracked, and reset at cuts.";
+                                    }
+
+                                    Help {
+                                        lines: 2;
+                                        text: "Applies on export. The preview shows a single "
+                                            + "frame, which has nothing to hold still.";
+                                        color: Pal.text-mute;
                                     }
                                 }
 

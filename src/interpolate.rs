@@ -158,8 +158,24 @@ impl Rife {
     }
 }
 
+/// Default cut threshold: mean absolute difference as a fraction of full range.
+pub(crate) const CUT_THRESHOLD: f32 = 0.28;
+
+/// Maps the UI's 0..1 sensitivity onto a difference threshold.
+///
+/// Inverted, because a higher setting should cut *more* readily, which means a
+/// *lower* difference is enough to count as an edit.
+pub(crate) fn cut_threshold(sensitivity: f32) -> f32 {
+    let s = sensitivity.clamp(0.0, 1.0);
+    0.45 - 0.35 * s
+}
+
 /// Avoids generating a motion-morphed frame across a hard edit.
 pub(crate) fn is_scene_cut(left: &Frame, right: &Frame) -> bool {
+    is_scene_cut_with(left, right, CUT_THRESHOLD)
+}
+
+pub(crate) fn is_scene_cut_with(left: &Frame, right: &Frame, threshold: f32) -> bool {
     let (sum, samples) = left
         .rgb
         .par_chunks_exact(3)
@@ -173,7 +189,7 @@ pub(crate) fn is_scene_cut(left: &Frame, right: &Frame) -> bool {
             (delta, 3u64)
         })
         .reduce(|| (0.0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
-    samples > 0 && sum / (samples as f32 * 255.0) > 0.28
+    samples > 0 && sum / (samples as f32 * 255.0) > threshold
 }
 
 pub fn color_reference(left: &Frame, right: &Frame, phase: f32) -> Frame {

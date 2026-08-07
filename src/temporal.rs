@@ -93,6 +93,10 @@ impl Flow {
     }
 
     /// Mean vector magnitude, used to spot implausible global motion.
+    ///
+    /// Part of the measurement API rather than the pipeline: the Phase 1
+    /// scorecard reports it per frame pair.
+    #[allow(dead_code)]
     pub fn mean_magnitude(&self) -> f32 {
         if self.dx.is_empty() {
             return 0.0;
@@ -444,10 +448,20 @@ impl Motion {
 ///   Where it does not, the pixel is occluded or the match was arbitrary. This
 ///   is what catches motion boundaries, which residual alone can miss when a
 ///   wrong match happens to score well.
+/// The export path calls [`analyze_with`] so the user's cut sensitivity
+/// applies; this default-sensitivity form is the one tests and measurement use.
+#[allow(dead_code)]
 pub fn analyze(prev: &Frame, cur: &Frame) -> Result<Motion, String> {
+    analyze_with(prev, cur, 0.4)
+}
+
+/// As [`analyze`], with the scene-cut sensitivity exposed (0..1, higher cuts
+/// more readily).
+pub fn analyze_with(prev: &Frame, cur: &Frame, cut_sensitivity: f32) -> Result<Motion, String> {
     let flow = estimate(prev, cur)?;
 
-    if crate::interpolate::is_scene_cut(prev, cur) {
+    let threshold = crate::interpolate::cut_threshold(cut_sensitivity);
+    if crate::interpolate::is_scene_cut_with(prev, cur, threshold) {
         let confidence = vec![0.0; flow.dx.len()];
         return Ok(Motion {
             flow,
@@ -570,7 +584,11 @@ pub fn lock(
     }
 }
 
-/// Mean absolute per-channel difference, 0..255. The flicker metric.
+/// Mean absolute per-channel difference, 0..255.
+///
+/// The flicker metric the Phase 1 acceptance bar is stated in, so it lives here
+/// rather than in a test module even though nothing in the pipeline calls it.
+#[allow(dead_code)]
 pub fn mean_abs_diff(a: &Frame, b: &Frame) -> f32 {
     if a.rgb.len() != b.rgb.len() || a.rgb.is_empty() {
         return f32::MAX;

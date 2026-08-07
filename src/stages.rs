@@ -17,8 +17,15 @@ pub struct Stages {
     decode: Cell<Duration>,
     interpolate: Cell<Duration>,
     model: Cell<Duration>,
+    lock: Cell<Duration>,
     post: Cell<Duration>,
     encode: Cell<Duration>,
+    /// How much of the frame the lock actually held, averaged over locked
+    /// frames. Without this the log says the lock ran but not whether it did
+    /// anything — a run where confidence collapsed everywhere looks identical
+    /// to one where it worked.
+    confidence_sum: Cell<f32>,
+    locked_frames: Cell<u64>,
     /// The first model call separately, because it carries one-off costs —
     /// CUDA session creation, cuDNN algorithm autotuning, memory arena growth
     /// — that never recur. Folding it into the average makes short runs look
@@ -60,6 +67,15 @@ impl Stages {
         out
     }
 
+    pub fn lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        accumulate(&self.lock, f)
+    }
+
+    pub fn record_confidence(&self, mean: f32) {
+        self.confidence_sum.set(self.confidence_sum.get() + mean);
+        self.locked_frames.set(self.locked_frames.get() + 1);
+    }
+
     pub fn post<T>(&self, f: impl FnOnce() -> T) -> T {
         accumulate(&self.post, f)
     }
@@ -75,6 +91,7 @@ impl Stages {
             .get()
             .saturating_add(self.interpolate.get())
             .saturating_add(self.model.get())
+            .saturating_add(self.lock.get())
             .saturating_add(self.post.get())
             .saturating_add(self.encode.get())
     }
@@ -108,6 +125,19 @@ impl Stages {
             per_frame(self.model.get()),
             share(self.model.get())
         ));
+
+        // Only present when the temporal lock actually ran.
+        if !self.lock.get().is_zero() {
+            let locked = self.locked_frames.get().max(1);
+            parts.push(format!(
+                "lock {:.0}ms/{:.0}% (held {:.2} over {} frames)",
+                per_frame(self.lock.get()),
+                share(self.lock.get()),
+                self.confidence_sum.get() / locked as f32,
+                self.locked_frames.get()
+            ));
+        }
+
         parts.push(format!(
             "post {:.0}ms/{:.0}%",
             per_frame(self.post.get()),

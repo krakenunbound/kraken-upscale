@@ -21,6 +21,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use crate::interpolate::{self, Rife};
 use crate::media::{self, ClipInfo, Frame};
 use crate::stages::Stages;
+use crate::temporal;
 use crate::upscale::{self, Upscaler};
 
 #[derive(Clone)]
@@ -32,6 +33,12 @@ pub struct ExportSpec {
     pub detail_limit: f32,
     pub source_treatment: media::SourceTreatment,
     pub match_color: bool,
+    /// Temporal lock: hold invented detail still across frames.
+    pub stability: bool,
+    /// How strongly to hold it, before the per-region confidence gate.
+    pub lock_strength: f32,
+    /// Scene-cut sensitivity, 0..1. Higher cuts more readily.
+    pub cut_detect: f32,
     pub interpolation_fps: Option<u32>,
     pub fp16: bool,
     pub tile: u32,
@@ -238,6 +245,10 @@ pub fn run(
     let mut nothing = |_: u32, _: u32| {};
     let stages = Stages::new();
 
+    // Temporal lock state. Only the previous output and the frame it came from
+    // are kept, so the export stays streaming regardless of clip length.
+    let mut previous: Option<(Frame, Frame)> = None;
+
     let processing = (|| -> Result<(), String> {
         let mut process_frame = |source: &Frame| -> Result<(), String> {
             if cancel.load(Ordering::Relaxed) {
@@ -247,7 +258,7 @@ pub fn run(
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let final_frame = stages.post(|| {
+            let mut final_frame = stages.post(|| {
                 let colored = if spec.match_color {
                     upscale::match_color_to_source(&out, source)
                 } else {
@@ -258,6 +269,28 @@ pub fn run(
                 let (ow, oh) = spec.output_size();
                 upscale::resample(&blended, ow, oh)
             });
+
+            // The lock runs last, on the finished frame, so what gets held is
+            // exactly what was written — locking before post-processing would
+            // carry forward detail that later stages then alter.
+            if spec.stability {
+                if let Some((prev_source, prev_output)) = previous.as_ref() {
+                    final_frame = stages.lock(|| -> Result<Frame, String> {
+                        let motion =
+                            temporal::analyze_with(prev_source, source, spec.cut_detect)?;
+                        stages.record_confidence(motion.mean_confidence());
+                        let scale = final_frame.width as f32 / source.width.max(1) as f32;
+                        Ok(temporal::lock(
+                            prev_output,
+                            &final_frame,
+                            &motion,
+                            spec.lock_strength,
+                            scale,
+                        ))
+                    })?;
+                }
+                previous = Some((source.clone(), final_frame.clone()));
+            }
 
             stages.encode(|| {
                 enc_in
@@ -410,6 +443,9 @@ mod tests {
             detail_limit: 1.0,
             source_treatment: media::SourceTreatment::default(),
             match_color: true,
+            stability: false,
+            lock_strength: 0.75,
+            cut_detect: 0.4,
             interpolation_fps: None,
             fp16: false,
             tile: 256,
@@ -482,6 +518,10 @@ mod tests {
             detail_limit: 1.0,
             source_treatment: media::SourceTreatment::default(),
             match_color: true,
+            // The point of this measurement is the unlocked reference.
+            stability: false,
+            lock_strength: 0.0,
+            cut_detect: 0.4,
             interpolation_fps: None,
             fp16: true,
             tile: crate::recommended_tile(),
@@ -512,6 +552,139 @@ mod tests {
 
         let _ = std::fs::remove_file(input);
         let _ = std::fs::remove_file(output);
+    }
+
+    /// Phase 1 acceptance: does the lock actually reduce flicker on a real
+    /// export, and at what cost?
+    ///
+    /// Exports the same clip twice — unlocked, then locked — and compares
+    /// frame-to-frame difference across the decoded results. Flicker is
+    /// measured on the *output*, because that is what the viewer sees.
+    ///
+    /// `cargo test --release locked_export_reduces_flicker -- --ignored --nocapture`
+    #[test]
+    #[ignore = "set KRAKEN_TEST_CLIP to measure the temporal lock end to end"]
+    fn locked_export_reduces_flicker() {
+        let _ = crate::cuda::prepare();
+        let source = std::env::var_os("KRAKEN_TEST_CLIP")
+            .map(PathBuf::from)
+            .expect("KRAKEN_TEST_CLIP is required");
+        let temp = std::env::temp_dir();
+        let pid = std::process::id();
+        let input = temp.join(format!("kraken-lock-in-{pid}.mkv"));
+
+        let status = quiet(&mut Command::new(media::ffmpeg()))
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&source)
+            .args(["-t", "0.75", "-an", "-c:v", "ffv1"])
+            .arg(&input)
+            .status()
+            .expect("create lock test clip");
+        assert!(status.success());
+
+        let clip = media::probe(&input).expect("probe clip");
+        let model = upscale::registry()
+            .into_iter()
+            .find(|entry| entry.name.contains("UltraSharp"))
+            .expect("find UltraSharp");
+
+        // Mean absolute difference between consecutive decoded output frames.
+        // Lower means the picture is holding still.
+        let measure = |path: &std::path::Path| -> f32 {
+            let out = media::probe(path).expect("probe export");
+            let step = 1.0 / out.fps.max(1.0);
+            let mut total = 0.0;
+            let mut n = 0;
+            for i in 0..(out.frames.min(16).saturating_sub(1)) {
+                let a = media::frame_at(&out, i as f64 * step, None).expect("frame a");
+                let b = media::frame_at(&out, (i + 1) as f64 * step, None).expect("frame b");
+                total += crate::temporal::mean_abs_diff(&a, &b);
+                n += 1;
+            }
+            total / n.max(1) as f32
+        };
+
+        let run_export = |stability: bool, strength: f32, tag: &str| -> (f32, f32) {
+            let out_path = temp.join(format!("kraken-lock-{tag}-{pid}.mp4"));
+            let _ = std::fs::remove_file(&out_path);
+            let mut up = Upscaler::load(&model, true).expect("load model");
+            assert_eq!(up.provider, "CUDA");
+            let spec = ExportSpec {
+                clip: clip.clone(),
+                model: model.clone(),
+                target_scale: 2,
+                strength,
+                detail_limit: 1.0,
+                source_treatment: media::SourceTreatment::default(),
+                match_color: true,
+                stability,
+                lock_strength: 0.75,
+                cut_detect: 0.4,
+                interpolation_fps: None,
+                fp16: true,
+                tile: crate::recommended_tile(),
+                out_path: out_path.clone(),
+                codec: "h264_nvenc".into(),
+                cq: 19,
+            };
+            let started = std::time::Instant::now();
+            let stages = run(
+                &spec,
+                &mut up,
+                None,
+                spec.tile,
+                16,
+                Arc::new(AtomicBool::new(false)),
+                &mut |_, _| {},
+            )
+            .expect("export");
+            let wall = started.elapsed();
+            println!("{tag}: {}", stages.summary(wall));
+            let flicker = measure(&out_path);
+            let _ = std::fs::remove_file(&out_path);
+            (flicker, wall.as_secs_f32())
+        };
+
+        // Strength 0 blends fully back to the source, so this run carries no
+        // invented detail while passing through the identical pipeline and
+        // encoder. Whatever flicker it shows is the floor: the source's own
+        // frame-to-frame change plus NVENC noise, none of which the lock can
+        // or should remove.
+        let (floor, _) = run_export(false, 0.0, "reference");
+        let (unlocked, unlocked_secs) = run_export(false, 1.0, "unlocked");
+        let (locked, locked_secs) = run_export(true, 1.0, "locked");
+
+        // Deliberately unclamped. If the locked run falls *below* the floor the
+        // lock is suppressing the source's own change as well as the model's
+        // invented detail — over-locking, which reads as smearing on motion.
+        // Clamping at zero would hide that as a flattering "100% removed".
+        let added_unlocked = unlocked - floor;
+        let added_locked = locked - floor;
+        let added_reduction = (1.0 - added_locked / added_unlocked.max(1e-6)) * 100.0;
+        let total_reduction = (1.0 - locked / unlocked.max(1e-6)) * 100.0;
+        let overhead = (locked_secs / unlocked_secs.max(1e-6) - 1.0) * 100.0;
+
+        println!("\n=== TEMPORAL LOCK ===");
+        println!("floor (no invented detail)  {floor:.3}");
+        println!("unlocked                    {unlocked:.3}  (model added {added_unlocked:.3})");
+        println!("locked                      {locked:.3}  (model added {added_locked:.3})");
+        println!("model-added flicker removed {added_reduction:+.1}%   <- acceptance bar");
+        println!("total output flicker        {total_reduction:+.1}%");
+        println!("wall cost                   {overhead:+.1}%");
+        if added_locked < 0.0 {
+            println!(
+                "WARNING: locked output is {:.3} below the no-detail floor — the lock is \
+                 also suppressing genuine source change, which will smear motion",
+                -added_locked
+            );
+        }
+        println!("=====================\n");
+
+        let _ = std::fs::remove_file(input);
+        assert!(
+            locked < unlocked,
+            "lock must not increase flicker: {unlocked:.3} -> {locked:.3}"
+        );
     }
 
     #[test]
@@ -557,6 +730,9 @@ mod tests {
             detail_limit: 1.0,
             source_treatment: media::SourceTreatment::default(),
             match_color: true,
+            stability: false,
+            lock_strength: 0.0,
+            cut_detect: 0.4,
             interpolation_fps: Some(60),
             fp16: true,
             tile: 256,

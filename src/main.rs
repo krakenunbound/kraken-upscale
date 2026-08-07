@@ -502,6 +502,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     deinterlace: ui.get_detect_fields(),
                 },
                 match_color: ui.get_match_color(),
+                stability: ui.get_stability_on(),
+                lock_strength: ui.get_lock(),
+                cut_detect: ui.get_cut_detect(),
                 interpolation_fps,
                 fp16: ui.get_fp16(),
                 tile: if ui.get_auto_tile() {
