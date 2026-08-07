@@ -19,10 +19,24 @@
 ### Measured
 
 - Flow costs **5–8 ms per frame pair** — 0.4% of the 1.65 s/frame model budget.
-- Residual falls on every pair with real motion and never rises.
-- `SpaceVoyage_2` is nearly static (0.02–0.76 px mean motion). It exercises the
-  flicker case the acceptance criteria target, but a clip with real
-  displacement is still needed to test tracking and ghosting.
+- Residual falls on every pair measured and never rises.
+- On `SpaceVoyage_4` (240 frames, real motion), sampling 10 pairs spread across
+  the clip: **mean residual reduction +35.3%**, best +58%.
+- `SpaceVoyage_2` is nearly static (0.02–0.76 px mean motion) and exercises only
+  the flicker case; the measurement test now samples across the whole clip
+  rather than taking six consecutive frames from the opening shot.
+
+### Identified for the confidence gate
+
+Two failure modes, both to be handled by declining to lock rather than by
+improving the estimator:
+
+- **Brightness change** — SAD is not intensity-invariant, so a fade or lighting
+  shift leaves no good match. The clip's first frame pair reduced residual by
+  only 2% despite 3.6 px of apparent motion.
+- **Large or discontinuous motion** — at 9.8 px mean motion the reduction fell
+  to 17%. Block matching is weakest at motion boundaries, and the median filter
+  that removes outliers also smooths across genuine edges.
 
 ### Fixed
 

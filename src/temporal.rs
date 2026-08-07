@@ -17,6 +17,22 @@
 //! `estimate` is a single function and can be swapped for a learned model later
 //! without touching the rest of the pipeline.
 //!
+//! ## Known failure modes, for the confidence gate to catch
+//!
+//! Measured on real footage (`SpaceVoyage_4`, +35% mean residual reduction over
+//! 10 pairs spread across the clip), the two weakest results were:
+//!
+//! * **Brightness change.** SAD is not invariant to intensity, so on a fade or
+//!   lighting shift no offset matches well and the field is unreliable. The
+//!   first frame pair of the clip reduced residual by only 2% despite 3.6px of
+//!   apparent motion.
+//! * **Large or discontinuous motion.** At 9.8px mean motion the reduction fell
+//!   to 17%: block matching is weakest at motion boundaries, and the median
+//!   filter that removes outliers also smooths across genuine edges.
+//!
+//! Neither is worth fixing in the estimator. Both are cases where the lock must
+//! *decline to lock* and use fresh detail instead.
+//!
 //! ## Convention
 //!
 //! `estimate(prev, cur)` returns flow such that `prev(p + flow(p)) ≈ cur(p)`.
@@ -496,8 +512,16 @@ mod tests {
         let clip = crate::media::probe(&path).expect("probe clip");
         let step = 1.0 / clip.fps.max(1.0);
 
+        // Spread the samples across the clip. Consecutive frames from the
+        // start only characterise whatever the opening shot happens to be
+        // doing, which on a 240-frame clip is not representative.
+        const SAMPLES: u32 = 10;
+        let span = clip.frames.max(2) - 1;
+
         let mut worst = 0.0f32;
-        for index in 0..6u32 {
+        let mut total_reduction = 0.0f32;
+        for sample in 0..SAMPLES {
+            let index = (sample as u64 * span / SAMPLES as u64) as u32;
             let prev = crate::media::frame_at(&clip, index as f64 * step, None).expect("prev");
             let cur =
                 crate::media::frame_at(&clip, (index + 1) as f64 * step, None).expect("cur");
@@ -515,6 +539,7 @@ mod tests {
                 0.0
             };
             worst = worst.max(after / before.max(1e-6));
+            total_reduction += reduction;
 
             println!(
                 "pair {index}->{}: residual {before:.2} -> {after:.2} ({reduction:+.0}%) · \
@@ -524,6 +549,11 @@ mod tests {
                 flow.mean_magnitude()
             );
         }
+
+        println!(
+            "mean residual reduction across {SAMPLES} pairs: {:+.1}%",
+            total_reduction / SAMPLES as f32
+        );
 
         // Warping must not make frames *less* similar. A stricter bar belongs
         // on the full lock, where the confidence gate can reject bad flow;

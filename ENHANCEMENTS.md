@@ -146,10 +146,20 @@ for each output frame t:
 | State | Last output + last source only (streamable; no full-clip buffer) | next |
 | UI | Enable Stability for real: on/off + lock strength | next |
 
-**Test clip caveat:** `SpaceVoyage_2` has 0.02–0.76 px mean motion. It is the
-right asset for the *flicker* acceptance bar (static AI crops) but proves
-nothing about tracking or ghosting. A clip with real displacement — a pan or a
-talking head — is needed before the lock can be signed off.
+**Flow validated on real motion.** `SpaceVoyage_4` (240 frames, 10 pairs
+sampled across the clip): **mean residual reduction +35.3%**, best +58%, at a
+constant 5–6 ms per pair.
+
+`SpaceVoyage_2` remains useful only for the flicker bar — 0.02–0.76 px mean
+motion means it proves nothing about tracking.
+
+**Two failure modes the confidence gate must catch** (do not try to fix these
+in the estimator; the correct response is to decline to lock):
+
+| Case | Evidence | Why |
+|---|---|---|
+| Brightness change | first pair: +2% despite 3.6 px motion | SAD is not intensity-invariant, so a fade leaves no good match anywhere |
+| Large / discontinuous motion | 9.8 px pair: +17% | block matching is weakest at motion boundaries, and the outlier median smooths across genuine edges |
 
 **Risks:** ghosting on fast motion, sticky detail across cuts, extra VRAM for previous full-res frame, interaction with color-match order.
 
