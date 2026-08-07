@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — Phase 1 step 1: optical flow
+
+### Temporal lock groundwork
+
+- Added `src/temporal.rs`: motion estimation, warping, and the mean-absolute-
+  difference metric the lock will be measured by. Not yet wired into the
+  pipeline.
+- Resolved ENHANCEMENTS decision checkpoint 1 in favour of a **built-in
+  estimator** rather than a downloaded RAFT ONNX. Reasoning is in the module
+  header: the lock is not optional the way interpolation is, so requiring a
+  second download would mean most users never get it. The confidence gate, not
+  flow accuracy, is what keeps poor estimates safe.
+- Coarse-to-fine block matching on a luma pyramid, with a median filter over
+  the vector field and a small zero-bias so flat regions resolve to no motion
+  rather than noise.
+
+### Measured
+
+- Flow costs **5–8 ms per frame pair** — 0.4% of the 1.65 s/frame model budget.
+- Residual falls on every pair with real motion and never rises.
+- `SpaceVoyage_2` is nearly static (0.02–0.76 px mean motion). It exercises the
+  flicker case the acceptance criteria target, but a clip with real
+  displacement is still needed to test tracking and ghosting.
+
+### Fixed
+
+- **`frame_at` returned the wrong frame.** The seek time was formatted to
+  millisecond precision, but a 24 fps frame spans 41.667 ms — so frame 2 begins
+  at 0.083333 s while the request rounded to `0.083`, landing back inside frame
+  1. Timeline scrubbing could show a stale frame. Found because two of six
+  measured frame pairs reported exactly 0.00 residual while the same frames
+  extracted sequentially were all distinct.
+
 ## Unreleased — Phase 0 export instrumentation
 
 ### Stage timing

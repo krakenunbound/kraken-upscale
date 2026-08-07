@@ -137,14 +137,19 @@ for each output frame t:
   # cuts / low conf → pure detail_t
 ```
 
-| Piece | Approach |
-|---|---|
-| Flow | Drop-in ONNX (RAFT-small or lighter) on same ORT CUDA stack as RIFE |
-| Warp | Correct bilinear warp of previous **output**; optimize later if hot |
-| Confidence | Forward–backward consistency + magnitude + scene cut |
-| Cuts | Reuse/extend `interpolate::is_scene_cut` |
-| State | Last output + last source only (streamable; no full-clip buffer) |
-| UI | Enable Stability for real: on/off + lock strength |
+| Piece | Approach | State |
+|---|---|---|
+| Flow | Built-in pyramid block matching (`temporal::estimate`) | **done** — 5–8 ms/pair |
+| Warp | Bilinear warp of previous **output**, scale-aware | **done** — `temporal::warp` |
+| Confidence | Forward–backward consistency + magnitude + scene cut | next |
+| Cuts | Reuse/extend `interpolate::is_scene_cut` | next |
+| State | Last output + last source only (streamable; no full-clip buffer) | next |
+| UI | Enable Stability for real: on/off + lock strength | next |
+
+**Test clip caveat:** `SpaceVoyage_2` has 0.02–0.76 px mean motion. It is the
+right asset for the *flicker* acceptance bar (static AI crops) but proves
+nothing about tracking or ghosting. A clip with real displacement — a pan or a
+talking head — is needed before the lock can be signed off.
 
 **Risks:** ghosting on fast motion, sticky detail across cuts, extra VRAM for previous full-res frame, interaction with color-match order.
 
@@ -273,9 +278,20 @@ Do not reopen closed bugslist items unless a new regression appears. Preserve RI
 
 ---
 
-## 8. Decision checkpoints (open)
+## 8. Decision checkpoints
 
-1. **Flow model:** RAFT-small ONNX vs lighter DIS-style estimator — pick smallest stable at 480p–1080p during Phase 1.  
+1. ~~**Flow model:** RAFT-small ONNX vs lighter DIS-style estimator.~~
+   **DECIDED — built-in estimator** (`src/temporal.rs`, coarse-to-fine block
+   matching on a luma pyramid). Rejected a downloaded RAFT ONNX because the
+   lock is not optional the way interpolation is: without it this is an image
+   upscaler applied 24 times a second, so a second required download means most
+   users never get the feature that closes the quality gap. Flow accuracy is
+   the obvious objection; the **confidence gate** is the answer, since
+   unreliable estimates fall back to fresh detail and degrade to current
+   behaviour rather than to ghosting. `estimate()` is a single function and can
+   be swapped for a learned model if measurement demands it.
+   Measured: **5–8 ms per pair, 0.4% of the model budget**; residual never
+   increased on real frames.  
 2. **TRT packaging:** ship TensorRT runtime in-box vs require user install — in-box preferred for self-contained product (Phase 4).  
 3. **Default recipe:** AI Clean vs Film/DVD for first-run UX.  
 4. **Face stage:** include after lock, or defer to Phase 5+.  
