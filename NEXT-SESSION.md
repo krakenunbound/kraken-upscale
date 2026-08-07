@@ -115,16 +115,16 @@ the wrong conclusion about whether it is broken.
    - Confidence releases with displacement (16 px, set from measurement), and
      **the preview now shows the lock** — scrub off frame zero with Stability
      on and the status line reports `lock 0.75 × held 0.80`.
-   - **Two things remain before sign-off, and both need your eyes:**
-     1. **Pick the default Lock value.** 0.75 measurably over-locks on
-        near-static content — locked output falls below the no-invented-detail
-        floor, meaning real source change is being smoothed too. That is
-        inherent to a temporal filter and cannot be metric-tuned away; it needs
-        someone to look at 0.5 / 0.65 / 0.75 in the preview and judge. The
-        preview makes this a minute's work now rather than an export each.
-     2. **No-cut-ghosting is unverified.** Neither test clip contains a hard
-        edit, so the cut-reset path has only been exercised synthetically. A
-        clip with two spliced shots would close it.
+   - **No-cut-ghosting is verified** on `assets/hardcut-test.mp4`, a spliced
+     clip with a real edit: one cut found, confidence zeroed, locked output
+     byte-identical to fresh detail.
+   - **One thing remains, and it needs your eyes, not more measurement:**
+     **pick the default Lock value.** 0.75 measurably over-locks on near-static
+     content — locked output falls below the no-invented-detail floor, so real
+     source change is being smoothed too. That is inherent to a temporal filter
+     (DECISIONS §12) and cannot be metric-tuned away: optimising the residual
+     drives the setting to 1.0, which is wrong. Compare 0.5 / 0.65 / 0.75 in
+     the preview — a minute's work now that the lock is previewable.
 
    Reproduce the measurements:
 

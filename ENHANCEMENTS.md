@@ -84,6 +84,26 @@ set KRAKEN_TEST_CLIP=F:\MiniMaxH3\outputs\2026-08-06\SpaceVoyage_2.mp4
 cargo test --release baseline_stage_timings -- --ignored --nocapture
 ```
 
+#### FP16 — settled
+
+The first attempt concluded fp16 was *slower* (10.8 s vs 8.1 s). That reading
+was entirely warm-up noise: session creation and cuDNN autotuning were inside
+the per-frame average. Measured on steady-state model time alone, with fp32
+running first so the ordering is pessimistic for the claim:
+
+| | model steady |
+|---|---|
+| fp32 | 8026 ms/frame |
+| **fp16** | **1668 ms/frame** |
+
+**4.8× faster.** Far beyond the ~2× tensor cores alone would explain, which
+suggests cuDNN also selects a poor fp32 algorithm at 896 px tiles. FP16 is not
+optional on this hardware and the default being on is correct.
+
+```text
+cargo test --release fp16_versus_fp32 -- --ignored --nocapture
+```
+
 ### What already works well
 
 - Open folder-drop models (`.pth` RRDBNet + `.onnx`)
@@ -239,7 +259,7 @@ Already strong: `clamp_deviation`, strength blend, resample-last, model guidance
 | 3 | Serial tiles | 1.5–2× | One `run_tile` at a time in `Upscaler::run` |
 | 4 | Host NCHW pack + H2D/D2H per tile | 1.2–1.5× | CPU build every tile |
 | 5 | 4× model for 2× target | ~1.2× measured | Prefer native 2× model |
-| 6 | Session create mixed into timings | — | Makes FP16 comparison invalid today |
+| 6 | ~~Session create mixed into timings~~ | **resolved** | Warm-up is tracked separately; FP16 settled below |
 | 7 | RIFE multiplies detail work | policy | Every output frame still upscaled |
 
 **Note:** Performance work is **after** temporal lock so we accelerate the real product path (including lock cost).

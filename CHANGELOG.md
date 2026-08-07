@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased — two "blocked" items were not actually blocked
+
+### No-cut-ghosting verified on real footage
+
+The cut-reset path had only ever been exercised on synthetic solid-colour
+frames, because neither test clip contained a hard edit. Rather than wait for
+one, `assets/hardcut-test.mp4` was built by splicing the two source clips,
+giving a genuine edit at a known position.
+
+`hard_cut_releases_the_lock_on_real_footage` asserts exactly one cut is found,
+that confidence is zeroed there, and that locked output is **byte-identical**
+to fresh detail — nothing from the previous shot bleeds across. Runs in the
+default suite; no GPU required.
+
+This closes the second half of the Phase 1 acceptance bar.
+
+### FP16 settled — 4.8× faster, not slower
+
+The earlier comparison concluded fp16 was *slower* (10.8 s vs 8.1 s). That was
+entirely warm-up noise: CUDA session creation and cuDNN autotuning sat inside
+the per-frame average. With warm-up tracked separately:
+
+| | model steady |
+|---|---|
+| fp32 | 8026 ms/frame |
+| **fp16** | **1668 ms/frame** |
+
+fp32 runs first, so the ordering is pessimistic for the result being claimed.
+The margin is well beyond the ~2× tensor cores alone would explain, which
+suggests cuDNN also picks a poor fp32 algorithm at 896 px tiles. FP16 is not
+optional on this hardware, and the default being on is correct.
+
 ## Unreleased — project audit (A1–A5)
 
 Fresh audit of the tree after the B33–B42 closeout. Findings were mostly
