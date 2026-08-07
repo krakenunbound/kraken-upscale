@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — bug audit closeout (B33–B42)
+
+All ten findings from the 2026-08-07 audit are closed. Nine were fixed; one did
+not survive investigation.
+
+### Fixed
+
+- **B33** — runtime readiness derives from the CUDA payload rather than
+  `nvidia-smi`. `GPU RUNTIME MISSING` was immediately overwritten by the probe,
+  so a driver that could see a device reported `RUNTIME OK` even when ONNX
+  Runtime had no provider it could load. `gpu::probe` now reports device
+  presence only and the caller combines it with `cuda_dir`.
+- **B35** — the Source help claimed AI video "skips deblock entirely" while
+  Restore ran on every profile. Fixed the **copy**, not the gating: Restore is
+  an explicit selection and silently discarding it because of an unrelated
+  dropdown would be worse than honouring it. Deinterlace stays profile-gated
+  because it is automatic.
+- **B36** — before-pane frames decode on a worker thread. `media::frame_at`
+  spawns ffmpeg and blocks, and running that on the Slint event loop froze the
+  window on every scrub step. Generation-guarded on both the worker and the UI
+  thread, and coalesced to the newest position.
+- **B37** — the preview resumes when an export releases the GPU. Requests made
+  during an export only bumped the generation, leaving the after-pane stale.
+- **B38** — interpolated frame count scales the source count by the rate ratio
+  when duration is unknown, instead of falling back to the source count and
+  letting `-shortest` truncate the copied audio.
+- **B39** — pipe hand-off failures tear down both children. `Child` does not
+  kill on drop, so `?` there could orphan ffmpeg processes and their drain
+  threads.
+- **B40** — tile output is validated against the model's native scale, with the
+  implied scale in the error. A mis-tagged `models.json` entry or a
+  non-ESRGAN graph previously read past the buffer or corrupted the tile.
+- **B41** — `.pth` import mirrors the `.onnx` provider policy: CUDA with
+  `error_on_failure`, explicit CPU fallback, and the label taken from what was
+  registered rather than `CUDA::is_available()`, which reports compile-time
+  support and not what the session actually got.
+- **B42** — export progress stops quoting a total once frames written exceed
+  the probe estimate, rather than showing `134/120` with the bar at 100%.
+
+### Closed as not a bug
+
+- **B34** — filed as "the lock estimates flow from RIFE intermediates rather
+  than original decoded pairs". That describes the behaviour accurately but the
+  conclusion is wrong: output N comes from rendered frame N whether decoded or
+  synthesized, so motion between consecutive outputs *is* motion between
+  consecutive rendered frames. Using the original pair would be the real defect,
+  since interpolated outputs sit at intermediate times.
+
+  Measured to be sure — `lock_with_interpolation_does_not_regress` exports the
+  same clip at 60 fps with Stability off and on: flicker **1.641 → 1.401
+  (−14.6%)**. The combination improves output rather than smearing it. The
+  reasoning is recorded at the lock site so it is not "fixed" into the wrong
+  behaviour later.
+
 ## Unreleased — packaging
 
 - Embedded the application icon in the executable, generated at 7 sizes

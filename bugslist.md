@@ -14,7 +14,11 @@ Last updated: 2026-08-07
 
 ---
 
-## Open findings (2026-08-07 audit)
+> **Status 2026-08-07:** every finding below is closed. B33 and B35–B42 were
+> fixed; B34 was investigated and closed as not a defect. The descriptions are
+> kept as the record of what was wrong and why.
+
+## Findings (2026-08-07 audit) — all closed
 
 ### Critical / high
 
@@ -177,18 +181,39 @@ Earlier B1–B32 items remain closed in code. They are not re-opened by this pas
 - [x] B31 — Frame Interpolation runs a genuine RIFE model in preview and export
 - [x] B32 — Color Match affects RIFE and detail-model output in preview and export
 
-### Open checklist (this audit)
+### Open checklist (this audit) — all closed 2026-08-07
 
-- [ ] B33 — runtime pill trusts `nvidia-smi` over CUDA payload discovery
-- [ ] B34 — Stability + RIFE motion source is wrong
-- [ ] B35 — Content profile vs Restore gating / help text
-- [ ] B36 — UI-thread ffmpeg on seek/open
-- [ ] B37 — preview not resumed after export
-- [ ] B38 — RIFE frame count when duration is missing
-- [ ] B39 — export pipe hand-off cleanup
-- [ ] B40 — model output shape validation
-- [ ] B41 — `.pth` provider labelling / fallback parity
-- [ ] B42 — export progress total vs actual frames
+- [x] B33 — readiness derives from the CUDA payload; the probe reports device
+      presence only
+- [x] B34 — **closed as not a bug**, with a regression test. See below.
+- [x] B35 — Source help corrected; Restore stays ungated by design
+- [x] B36 — before-pane frames decode on a generation-guarded worker
+- [x] B37 — preview resumes when an export releases the GPU
+- [x] B38 — interpolated frame count scales by the rate ratio without duration
+- [x] B39 — pipe hand-off failure tears down both children
+- [x] B40 — tile output validated against the model's native scale
+- [x] B41 — `.pth` mirrors the `.onnx` provider policy and labels what it got
+- [x] B42 — progress stops quoting a total once writes exceed the estimate
+
+#### B34 — closed as not a bug
+
+**Filed as:** the lock estimates flow from `process_frame`'s `source`, which on
+the interpolation path is a RIFE intermediate rather than an original decoded
+pair.
+
+**Why that is correct:** output N is produced from rendered frame N, whether
+that frame was decoded or synthesized. The motion between consecutive *outputs*
+is therefore the motion between consecutive *rendered* frames, which is what the
+code uses. Substituting the original decoded pair would be the actual defect,
+because interpolated outputs sit at intermediate times and would be warped by a
+full source-interval of motion.
+
+**Evidence:** `lock_with_interpolation_does_not_regress` exports the same clip
+at 60 fps with Stability off and on. Flicker fell from 1.641 to 1.401
+(**−14.6%**) — the combination improves output rather than smearing it.
+
+The reasoning is also recorded as a comment at the lock site so it is not
+"fixed" into the wrong behaviour later.
 
 ---
 
@@ -237,3 +262,8 @@ session notes when convenient. That drift is not filed as a product bug.
   when prioritising.
 - Priority suggestion if fixing later: **B33**, **B34**, **B36**, **B38**, then
   **B35** / **B37**.
+- **Outcome:** all were addressed in one pass on 2026-08-07. One filed finding
+  (B34) did not survive investigation — worth remembering that a static audit
+  can describe behaviour accurately and still draw the wrong conclusion about
+  whether it is a defect. Measure before changing something the audit calls
+  broken.

@@ -65,6 +65,14 @@ robocopy vendor\ffmpeg\bin ffmpeg /XF ffplay.exe
 
 These generated payloads are intentionally ignored by Git.
 
+## Bug audit
+
+All ten findings from the 2026-08-07 audit (B33–B42) are closed — see
+[bugslist.md](bugslist.md) and [CHANGELOG.md](CHANGELOG.md). Nine were fixed;
+**B34 was closed as not a defect** after measurement contradicted it. Worth
+remembering: a static audit can describe behaviour accurately and still reach
+the wrong conclusion about whether it is broken.
+
 ## Completed reliability pass
 
 - Window close exits and requests active export cancellation.
@@ -96,17 +104,39 @@ These generated payloads are intentionally ignored by Git.
 
 ## Next product work
 
-1. **Temporal lock** — flow-guided stabilization of generated detail. Still the
-   main feature required to close the video-quality gap. **In progress:**
-   - Phase 0 (baseline instrumentation) is done — `src/stages.rs`, per-stage
-     timings in the activity log. Measured steady state is 1.65 s/frame with
-     the model at 98% of it.
-   - Flow estimation and warping are done — `src/temporal.rs`, built-in
-     pyramid block matching, +35% mean residual reduction on real motion at
-     5–6 ms per pair.
-   - **Next: confidence gate and blending.** Forward–backward consistency, a
-     brightness-change guard, scene-cut reset, then wire into preview and
-     export and make the Stability controls real.
+1. **Temporal lock** — **shipped and enabled**, but not yet signed off.
+   - Phase 0 baseline instrumentation: `src/stages.rs`, per-stage timings in
+     the activity log. Steady state 1.65 s/frame, model 98% of it.
+   - `src/temporal.rs`: built-in pyramid block matching, confidence gate
+     (match residual × forward–backward consistency), scale-aware warp and
+     confidence-weighted blend. Runs in export; Stability is a real control.
+   - Measured: **+154.6% of model-added flicker removed** at **+2.2% wall
+     cost** on near-static content, against a ≥50% bar.
+   - **Three things remain before sign-off:**
+     1. **Over-locking.** Locked output sits *below* the no-invented-detail
+        floor, so genuine source change is being suppressed too. Benign on
+        static content; the same mechanism smears motion. Consider lowering
+        the default Lock from 0.75 or making confidence fall off harder with
+        motion magnitude.
+     2. **Judge smearing by eye** on `SpaceVoyage_4`. A residual metric cannot
+        tell "held still correctly" from "smeared" — both reduce difference.
+     3. **No-cut-ghosting is unverified.** Neither test clip contains a hard
+        edit, so the cut-reset path has only been exercised synthetically. A
+        clip with two spliced shots would close this.
+
+   Reproduce the measurements:
+
+   ```text
+   set KRAKEN_CUDA_DIR=F:\Video Upscale\cuda
+   set KRAKEN_TEST_CLIP=F:\MiniMaxH3\outputs\2026-08-06\SpaceVoyage_2.mp4
+   cargo test --release locked_export_reduces_flicker -- --ignored --nocapture
+   cargo test --release flow_tracks_real_frames      -- --ignored --nocapture
+   cargo test --release baseline_stage_timings       -- --ignored --nocapture
+   ```
+
+   GPU tests need the ORT provider DLLs copied from `target/release/` into
+   `target/release/deps/`, or they silently fall back to CPU and fail an
+   unrelated assertion.
 2. **Source restoration** — deinterlace and deblock are active; IVTC and grain
    separation/re-injection remain.
 3. **Performance** — measured larger tiles and parallel post-processing landed;
