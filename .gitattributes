@@ -1,0 +1,5 @@
+# Neural-network payloads are binary even when a particular protobuf happens
+# not to contain an early NUL byte. Never apply line-ending conversion.
+*.onnx -text
+*.onnx.data -text
+*.pth -text
