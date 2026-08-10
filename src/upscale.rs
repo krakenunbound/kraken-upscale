@@ -25,6 +25,12 @@ pub struct ModelEntry {
     /// image model; values above one select the genuine video-model path.
     #[serde(default = "single_frame")]
     pub temporal_frames: u32,
+    /// Single-frame model selected specifically because it was trained or
+    /// tuned for video/animation restoration. This is deliberately separate
+    /// from `temporal_frames`: it must never be presented as a learned
+    /// multi-frame model.
+    #[serde(default)]
+    pub video_tuned: bool,
 }
 
 fn single_frame() -> u32 {
@@ -34,6 +40,16 @@ fn single_frame() -> u32 {
 impl ModelEntry {
     pub fn is_video(&self) -> bool {
         self.temporal_frames > 1
+    }
+
+    pub fn display_name(&self) -> String {
+        if self.is_video() {
+            format!("VIDEO · multi-frame · {}", self.name)
+        } else if self.video_tuned {
+            format!("VIDEO · fast frame model · {}", self.name)
+        } else {
+            format!("IMAGE · {}", self.name)
+        }
     }
 }
 
@@ -47,6 +63,22 @@ pub fn guidance(name: &str) -> &'static str {
     let n = name.to_ascii_lowercase();
     if n.contains("nanovsr") {
         "Genuine multi-frame video super-resolution. Uses neighboring frames together so detail follows motion instead of being reinvented frame by frame. Best on low-resolution live action; the separate Stability filter is bypassed."
+    } else if n.contains("animevideov3") {
+        "Fast, compact Real-ESRGAN model tuned for animation video. It processes one frame at a time, so Stability remains useful. Choose this for clean anime and generated 2D clips."
+    } else if n.contains("general-x4v3") {
+        "Fast, compact Real-ESRGAN model for general and AI-generated video. Gentler than UltraSharp and less likely to create crunchy edges. It is frame-based, so Stability remains useful."
+    } else if n.contains("cugan") && n.contains("denoise") {
+        "Real-CUGAN's strong cleanup option for noisy or compressed 2D video. It removes more damage but can erase fine texture. Frame-based; Stability remains useful."
+    } else if n.contains("cugan") {
+        "Real-CUGAN's conservative 2D/video option. Good for animation and generated clips when you want cleanup without aggressive denoising. Frame-based; Stability remains useful."
+    } else if n.contains("anisd") && n.contains("cel") {
+        "SPAN model specialized for cel animation with compression damage. Restores line work without the heavy edge halos of older anime models. Frame-based; Stability remains useful."
+    } else if n.contains("anisd") {
+        "General SPAN model for standard-definition animation. Natural and faithful rather than aggressively sharp. Frame-based; Stability remains useful."
+    } else if n.contains("openproteus") {
+        "Compact live-action video model intended for faithful HD/FHD-to-4K detail. Avoids aggressive oversharpening. Frame-based; Stability remains useful."
+    } else if n.contains("modernspanimation") {
+        "SPAN model for modern animation and generated 2D video. A balanced choice for clean line work and flat color. Frame-based; Stability remains useful."
     } else if n.contains("anime") {
         "Trained on line art. On photographic skin it invents dark strokes \
          and hard edges — use only for animation and 2D."
@@ -107,14 +139,16 @@ pub fn preferred_default(models: &[ModelEntry]) -> usize {
         let n = m.name.to_ascii_lowercase();
         if m.is_video() {
             0
-        } else if n.contains("remacri") {
+        } else if m.video_tuned && n.contains("general-x4v3") {
             1
-        } else if n.contains("ultrasharp") {
+        } else if n.contains("remacri") {
             2
-        } else if n.contains("siax") {
+        } else if n.contains("ultrasharp") {
             3
-        } else if n.contains("realesrgan") {
+        } else if n.contains("siax") {
             4
+        } else if n.contains("realesrgan") {
+            5
         } else if n.contains("anime") || n.contains("faces") {
             10
         } else {
@@ -158,6 +192,11 @@ pub fn registry() -> Vec<ModelEntry> {
     if let Ok(text) = std::fs::read_to_string(dir.join("video").join("models.json")) {
         if let Ok(mut video_meta) = serde_json::from_str::<Vec<ModelEntry>>(&text) {
             meta.append(&mut video_meta);
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join("video-frame").join("models.json")) {
+        if let Ok(mut video_frame_meta) = serde_json::from_str::<Vec<ModelEntry>>(&text) {
+            meta.append(&mut video_frame_meta);
         }
     }
 
@@ -206,8 +245,57 @@ pub fn registry() -> Vec<ModelEntry> {
             scale: known.map(|m| m.scale).unwrap_or(0),
             architecture: known.map(|m| m.architecture.clone()).unwrap_or_default(),
             temporal_frames: known.map(|m| m.temporal_frames).unwrap_or(1),
+            video_tuned: known.map(|m| m.video_tuned).unwrap_or(false),
             name,
         });
+    }
+
+    // Curated single-frame graphs tuned for video live separately from the
+    // older still-image collection. They use the regular NCHW inference path,
+    // but remain visibly distinct from both image models and genuine temporal
+    // models in the picker.
+    let video_frame_dir = dir.join("video-frame");
+    if let Ok(entries) = std::fs::read_dir(&video_frame_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("onnx") {
+                continue;
+            }
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+            if file_name.ends_with(".fp16.onnx") {
+                continue;
+            }
+            let known = meta.iter().find(|m| {
+                Path::new(&m.file).file_name().and_then(|n| n.to_str()) == Some(file_name.as_ref())
+            });
+            let Some(known) = known else {
+                eprintln!(
+                    "ignoring curated video frame model without metadata: {}",
+                    path.display()
+                );
+                continue;
+            };
+            if known.temporal_frames > 1 {
+                eprintln!(
+                    "ignoring temporal model in single-frame folder: {}",
+                    path.display()
+                );
+                continue;
+            }
+            let mut model = known.clone();
+            model.file = format!("video-frame/{}", file_name);
+            model.video_tuned = true;
+            if let Some(fp16) = &known.fp16_file {
+                model.fp16_file = Some(format!(
+                    "video-frame/{}",
+                    Path::new(fp16)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(fp16)
+                ));
+            }
+            out.push(model);
+        }
     }
 
     // Video models live in their own folder so interpolation/restoration
@@ -241,7 +329,16 @@ pub fn registry() -> Vec<ModelEntry> {
         }
     }
 
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let class = |model: &ModelEntry| {
+        if model.is_video() {
+            0
+        } else if model.video_tuned {
+            1
+        } else {
+            2
+        }
+    };
+    out.sort_by_key(|model| (class(model), model.name.to_lowercase()));
     out
 }
 
@@ -812,6 +909,7 @@ mod tests {
             scale,
             architecture: "rrdb".into(),
             temporal_frames: 1,
+            video_tuned: false,
         }
     }
 
@@ -840,6 +938,43 @@ mod tests {
         let advice = scale_advice(&entry("Big", 4), 2, &installed).expect("warns");
         assert!(advice.contains("~4x the work"), "{advice}");
         assert!(!advice.contains(" — "), "no alternative to name: {advice}");
+    }
+
+    #[test]
+    #[ignore = "requires the curated video-frame models and bundled CUDA runtime"]
+    fn curated_video_frame_models_run_on_cuda() {
+        let _ = crate::cuda::prepare();
+        let models: Vec<_> = registry()
+            .into_iter()
+            .filter(|model| model.video_tuned)
+            .collect();
+        assert_eq!(models.len(), 8, "curated video-frame model count");
+
+        let input = Frame {
+            width: 64,
+            height: 64,
+            rgb: (0..64 * 64 * 3).map(|i| (i % 251) as u8).collect(),
+        };
+        for model in models {
+            let mut up = Upscaler::load(&model, true)
+                .unwrap_or_else(|error| panic!("loading {}: {error}", model.name));
+            assert_eq!(up.provider, "CUDA", "{} provider", model.name);
+            let output = up
+                .run(&input, 64, 8, &mut |_, _| {})
+                .unwrap_or_else(|error| panic!("running {}: {error}", model.name));
+            assert_eq!(
+                output.width,
+                input.width * model.scale,
+                "{} width",
+                model.name
+            );
+            assert_eq!(
+                output.height,
+                input.height * model.scale,
+                "{} height",
+                model.name
+            );
+        }
     }
 
     #[test]

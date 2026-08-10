@@ -18,6 +18,12 @@ Direct import and inference are verified with unchanged community files:
 - Remacri 4×
 - NMKD Faces 8×
 
+The video picker also includes a GPU-verified fast set under
+`models/video-frame/`: Real-ESRGAN General x4v3 and AnimeVideo v3, two
+Real-CUGAN strengths, AniSD General/Cel SPAN, OpenProteus Compact, and
+ModernSpanimation V1. These remain single-frame graphs and are labelled that
+way. `models/video/` contains genuine neighboring-frame models such as NanoVSR.
+
 Both modern ZIP checkpoints and the legacy stream format used by many community
 models are supported. Old ESRGAN and newer RealESRGAN RRDBNet key layouts are
 recognized, including 2× input rearrangement and 2×/4×/8× native scales.
@@ -46,6 +52,8 @@ Kraken Upscale.exe
 ffmpeg/                          ffmpeg + ffprobe and their DLLs
 cuda/                            CUDA 13 + cuDNN 9 redistributables
 models/                          upscale models (.onnx / .pth)
+models/video-frame/              fast video-tuned frame models
+models/video/                    genuine neighboring-frame models
 models/interpolation/            RIFE timestep model
 onnxruntime_providers_cuda.dll
 onnxruntime_providers_shared.dll
@@ -67,11 +75,10 @@ These generated payloads are intentionally ignored by Git.
 
 ## Bug audit
 
-All ten findings from the 2026-08-07 audit (B33–B42) are closed — see
-[bugslist.md](bugslist.md) and [CHANGELOG.md](CHANGELOG.md). Nine were fixed;
-**B34 was closed as not a defect** after measurement contradicted it. Worth
-remembering: a static audit can describe behaviour accurately and still reach
-the wrong conclusion about whether it is broken.
+All findings through B44 are closed — see [bugslist.md](bugslist.md) and
+[CHANGELOG.md](CHANGELOG.md). B34 was closed as not a defect after measurement
+contradicted it. B43 added genuine multi-frame inference; B44 installed and
+clearly classified the recommended fast video-compatible model families.
 
 ## Completed reliability pass
 
@@ -183,8 +190,10 @@ A 10-second real sample is at
    remain, and matter more than expected for film-sourced Blu-rays.
 5. **Performance** — measured larger tiles and parallel post-processing landed;
    tile batching and optional TensorRT caching remain.
-6. **Broader frame-model families** — SPAN, Compact, and RealPLKSR need their own
-   native topology builders; current direct checkpoint support is RRDBNet.
+6. **Broader frame-model families** — ONNX SPAN, Compact, Real-CUGAN, and compact
+   Real-ESRGAN choices are now installed and verified. Direct checkpoint import
+   still supports RRDBNet only; RealPLKSR and additional topology builders
+   remain optional future work.
 7. **Target-format scaling** — HD/2K/4K presets remain designed but unbuilt.
 
 ## Regression assets

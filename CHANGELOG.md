@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — curated fast video model set
+
+- Added eight compact video-compatible ONNX choices: Real-ESRGAN General x4v3,
+  Real-ESRGAN AnimeVideo v3, Real-CUGAN Pro Conservative and Denoise 3, AniSD
+  General and Cel SPAN, OpenProteus Compact, and ModernSpanimation V1.
+- Added a separate `models/video-frame/` registry so fast frame-based video
+  models are not mixed up with still-image models or genuine multi-frame VSR.
+- The picker now labels all three classes explicitly: `VIDEO · multi-frame`,
+  `VIDEO · fast frame model`, and `IMAGE`.
+- Model-specific help states that the fast choices still process one frame at
+  a time and therefore keep Kraken's Stability lock available.
+- Recorded exact upstream sources and SHA-256 hashes beside the bundle.
+- Ran every added graph through actual CUDA inference at its declared native
+  scale. An incompatible ModernSpanimation FP16 graph was rejected; its working
+  FP32 graph is installed.
+- Rebuilt the root `Kraken Upscale.exe` (41,116,160 bytes; SHA-256
+  `CD17138FBFD5857FBEACBECD1D4C19BD0E5D2140745F5D43B9BDAF681E49D68D`).
+
 ## Unreleased — genuine multi-frame video super-resolution
 
 Kraken now has a distinct neural video-detail path instead of describing an

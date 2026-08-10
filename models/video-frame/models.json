@@ -1,0 +1,66 @@
+[
+  {
+    "name": "Real-ESRGAN General x4v3",
+    "file": "realesr-general-x4v3.onnx",
+    "scale": 4,
+    "architecture": "SRVGGNetCompact",
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "name": "Real-ESRGAN AnimeVideo v3",
+    "file": "realesr-animevideov3.onnx",
+    "scale": 4,
+    "architecture": "SRVGGNetCompact",
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "name": "Real-CUGAN Pro Conservative",
+    "file": "real-cugan-pro-conservative-2x.onnx",
+    "scale": 2,
+    "architecture": "Real-CUGAN Pro",
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "name": "Real-CUGAN Pro Denoise 3",
+    "file": "real-cugan-pro-denoise3x-2x.onnx",
+    "scale": 2,
+    "architecture": "Real-CUGAN Pro",
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "name": "AniSD General SPAN",
+    "file": "2x-AniSD-General-SPAN.onnx",
+    "scale": 2,
+    "architecture": "SPAN",
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "name": "AniSD Cel SPAN",
+    "file": "2x-AniSD-Cel-SPAN.onnx",
+    "scale": 2,
+    "architecture": "SPAN",
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "name": "OpenProteus Compact",
+    "file": "2x-OpenProteus.onnx",
+    "scale": 2,
+    "architecture": "Compact",
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "name": "ModernSpanimation V1",
+    "file": "2x-ModernSpanimationV1.onnx",
+    "scale": 2,
+    "architecture": "SPAN",
+    "temporal_frames": 1,
+    "video_tuned": true
+  }
+]

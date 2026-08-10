@@ -159,7 +159,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 } else {
                     format!("{}x", m.scale)
                 };
-                slint::SharedString::from(format!("{}  ({scale})", m.name))
+                slint::SharedString::from(format!("{}  ({scale})", m.display_name()))
             })
             .collect::<Vec<_>>(),
     )));
@@ -177,6 +177,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.set_model_index(idx as i32);
         ui.set_model_note(upscale::guidance(&models[idx].name).into());
         ui.set_model_is_video(models[idx].is_video());
+        ui.set_model_video_tuned(models[idx].video_tuned);
     }
     ui.set_scale_index(saved.scale_index);
     ui.set_strength(saved.strength);
@@ -243,6 +244,7 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             ui.set_model_note(upscale::guidance(&model.name).into());
             ui.set_model_is_video(model.is_video());
+            ui.set_model_video_tuned(model.video_tuned);
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
             ui.set_scale_note(
                 upscale::scale_advice(&model, target_scale, &models)

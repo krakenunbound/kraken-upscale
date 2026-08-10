@@ -142,6 +142,11 @@ cargo test --release fp16_versus_fp32 -- --ignored --nocapture
 | Target resolution presets | Yes | Multiplier only | Small |
 | Face refinement | Optional stages | Faces model present, not staged | Medium |
 
+The compatibility side now includes a curated fast video set: compact
+Real-ESRGAN General/AnimeVideo, Real-CUGAN, AniSD/OpenProteus/ModernSpanimation.
+They are valuable video-tuned frame models, not temporal models; the picker and
+Stability behavior make that distinction explicit.
+
 ---
 
 ## 4. Findings by area

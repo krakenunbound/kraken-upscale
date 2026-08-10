@@ -10,7 +10,7 @@ copy claims it is already active.
 **Method:** full pass over `src/*.rs` and the export/preview control surface in
 `ui/app.slint`. No fixes applied in this pass — findings only.
 
-Last updated: 2026-08-07
+Last updated: 2026-08-10
 
 ---
 
@@ -35,6 +35,26 @@ Last updated: 2026-08-07
   from `SpaceVoyage_2.mp4` produced all seven frames at the requested 2x output,
   exercising two windows and the padded EOF path.
 - [x] B43 — genuine multi-frame video super-resolution path
+
+### B44 — Recommended video-compatible models were absent from the picker
+
+- **Where:** model deployment, discovery, and Detail Model UI
+- **What:** only the genuine NanoVSR multi-frame graph and the older still-image
+  ESRGAN collection were installed. The compact Real-ESRGAN video variants,
+  Real-CUGAN, and representative SPAN/Compact models discussed for fast video
+  work were not actually present.
+- **Impact:** the UI gave no fast, conservative video-tuned choices and made it
+  look as though the recommendations had been implemented when they had not.
+- **Fix:** added a curated `models/video-frame/` collection with Real-ESRGAN
+  General x4v3, Real-ESRGAN AnimeVideo v3, two Real-CUGAN strengths, AniSD
+  General/Cel SPAN, OpenProteus Compact, and ModernSpanimation V1. The picker
+  now labels genuine temporal models `VIDEO · multi-frame`, this collection
+  `VIDEO · fast frame model`, and the older collection `IMAGE`.
+- **Verification:** all eight new graphs loaded through the CUDA provider and
+  completed native-scale inference. The incompatible ModernSpanimation FP16
+  graph was deliberately excluded instead of being silently selected.
+- [x] B44 — video-compatible Real-ESRGAN / Real-CUGAN / SPAN set installed,
+      distinguished honestly, and GPU-verified
 
 ## Findings (2026-08-07 audit) — all closed
 

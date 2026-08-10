@@ -220,6 +220,7 @@ mod tests {
             scale: 4,
             architecture: "video".into(),
             temporal_frames: 1,
+            video_tuned: false,
         };
         assert!(VideoUpscaler::load(&entry).is_err());
     }

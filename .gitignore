@@ -5,6 +5,7 @@
 /models/*.onnx
 /models/*.pth
 /models/interpolation/*.onnx
+/.model-staging/
 
 # Redistributable runtime payloads are staged for packaging, not source control.
 /cuda/

@@ -608,6 +608,7 @@ mod tests {
                 scale: 4,
                 architecture: "rrdb".into(),
                 temporal_frames: 1,
+                video_tuned: false,
             },
             target_scale: scale,
             strength: 1.0,

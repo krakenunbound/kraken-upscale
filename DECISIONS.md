@@ -3,7 +3,7 @@
 Running record of the choices behind this app, including the ones that were
 wrong and got reversed. Written so the reasoning survives being forgotten.
 
-Last updated: 2026-08-06
+Last updated: 2026-08-10
 
 ---
 
@@ -67,11 +67,14 @@ adds little and stays calm, a strong one adds gorgeous detail that shimmers.
 **Correction, 2026-08-10:** a post-model temporal constraint is useful, but it
 is not equivalent to a learned video super-resolution model. The primary path
 should consume neighboring frames inside the neural detail stage so motion and
-detail are learned together. The architecture is now two explicit modes:
+detail are learned together. The architecture now has three honest model
+classes:
 
 > multi-frame video model (preferred) → post-processing
 >
-> compatible image model → optional motion-guided temporal lock → post-processing
+> video-tuned frame model (fast) → optional motion-guided temporal lock → post-processing
+>
+> still-image model → optional motion-guided temporal lock → post-processing
 
 NanoVSR-644k is the first genuine video model. It consumes five frames as one
 NTCHW tensor, propagates features forward and backward, and returns five 4x
@@ -81,6 +84,12 @@ and pad the current window so recurrent features never cross between shots.
 The existing temporal lock remains valuable for the large library of RRDBNet /
 ESRGAN image models, but it is a compatibility bridge. It is bypassed for true
 video models because stacking both mechanisms suppresses genuine motion.
+
+Real-ESRGAN AnimeVideo/General v3, Real-CUGAN, SPAN, and Compact models are
+useful video choices without being temporal architectures. They are installed
+under `models/video-frame/`, labelled as fast frame models, and retain the
+Stability lock. This preserves the useful performance/quality recommendation
+without relabelling single-frame inference as multi-frame VSR.
 
 ---
 

@@ -40,6 +40,7 @@ export component MainWindow inherits Window {
     in property <float> preview-progress: 0;
     in property <string> model-note: "";
     in property <bool> model-is-video: false;
+    in property <bool> model-video-tuned: false;
     /// Set when the chosen model's native scale exceeds the requested one.
     in property <string> scale-note: "";
     in-out property <float> strength: 1.0;
@@ -1534,6 +1535,8 @@ export component MainWindow inherits Window {
                                                 lines: 3;
                                                 text: root.model-is-video
                                                     ? "This model consumes neighboring frames together and learns temporal detail directly. The separate frame-model lock is bypassed."
+                                                    : root.model-video-tuned
+                                                        ? "This model was selected for good video behavior, but it still processes one frame at a time. Stability remains available to reduce frame-to-frame shimmer."
                                                     : "Holds invented detail still across frames so texture stops boiling. This improves frame models but does not turn them into a learned video model.";
                                                 color: Pal.text-dim;
                                             }
