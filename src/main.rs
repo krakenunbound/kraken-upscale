@@ -476,6 +476,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let request = request.clone();
         let before_tx = before_tx.clone();
         let before_generation = before_generation.clone();
+        let preview_generation = preview_generation.clone();
         move |path: std::path::PathBuf| {
             let Some(ui) = handle.upgrade() else { return };
             let image_path = image_mode::is_supported(&path);
@@ -489,6 +490,12 @@ fn main() -> Result<(), slint::PlatformError> {
             if ui.get_mode_index() == 1 {
                 match image_mode::probe(&path) {
                     Ok(info) => {
+                        // A newly opened still is a replacement, not a second
+                        // comparison source. Remove both panes immediately and
+                        // invalidate any result the previous image may still
+                        // have queued from its GPU worker.
+                        preview_generation.fetch_add(1, Ordering::Relaxed);
+                        clear_source_display(&ui);
                         log(
                             &ui.as_weak(),
                             format!(
@@ -500,8 +507,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                 info.pix_fmt
                             ),
                         );
+                        *still.borrow_mut() = Some(info.clone());
                         load_image(&ui, &info);
-                        *still.borrow_mut() = Some(info);
                         request();
                     }
                     Err(error) => {
@@ -1553,7 +1560,12 @@ fn spawn_image_preview_worker(
             if current_generation.load(Ordering::Relaxed) == job.generation {
                 let h = handle.clone();
                 let before = source.clone();
+                let generation = current_generation.clone();
+                let wanted = job.generation;
                 let _ = slint::invoke_from_event_loop(move || {
+                    if generation.load(Ordering::Relaxed) != wanted {
+                        return;
+                    }
                     if let Some(ui) = h.upgrade() {
                         let image = to_image(&before);
                         ui.set_frame_before(image.clone());
@@ -1626,7 +1638,11 @@ fn spawn_image_preview_worker(
                     done as f32 / total as f32
                 };
                 let h = progress_handle.clone();
+                let generation = progress_generation.clone();
                 let _ = slint::invoke_from_event_loop(move || {
+                    if generation.load(Ordering::Relaxed) != wanted {
+                        return;
+                    }
                     if let Some(ui) = h.upgrade() {
                         ui.set_preview_progress(fraction);
                     }
@@ -2213,28 +2229,41 @@ fn reveal(path: &str) {
     let _ = cmd.spawn();
 }
 
-fn report(handle: &slint::Weak<MainWindow>, status: String, frame: Option<media::Frame>) {
-    let handle = handle.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        let Some(ui) = handle.upgrade() else { return };
-        ui.set_preview_status(status.into());
-        ui.set_preview_progress(0.0);
-        if let Some(f) = frame {
-            ui.set_frame_after(to_image(&f));
-        }
-    });
-}
-
 fn report_current(
     handle: &slint::Weak<MainWindow>,
-    current_generation: &std::sync::atomic::AtomicU64,
+    current_generation: &Arc<std::sync::atomic::AtomicU64>,
     generation: u64,
     status: String,
     frame: Option<media::Frame>,
 ) {
-    if current_generation.load(Ordering::Relaxed) == generation {
-        report(handle, status, frame);
+    if !preview_generation_is_current(current_generation, generation) {
+        return;
     }
+
+    // Checking only on the worker thread leaves a race: an old preview can
+    // queue its UI update, then a replacement image can invalidate it before
+    // that queued callback actually runs. Check the token again at the point
+    // where the panes are changed.
+    let handle = handle.clone();
+    let current_generation = current_generation.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if !preview_generation_is_current(&current_generation, generation) {
+            return;
+        }
+        let Some(ui) = handle.upgrade() else { return };
+        ui.set_preview_status(status.into());
+        ui.set_preview_progress(0.0);
+        if let Some(frame) = frame {
+            ui.set_frame_after(to_image(&frame));
+        }
+    });
+}
+
+fn preview_generation_is_current(
+    current_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+) -> bool {
+    current_generation.load(Ordering::Relaxed) == generation
 }
 
 fn clear_source_display(ui: &MainWindow) {
@@ -2342,6 +2371,14 @@ mod ui_tests {
             .iter()
             .all(|model| !model.is_video() && !model.video_tuned));
         assert_eq!(video.len() + image.len(), all.len());
+    }
+
+    #[test]
+    fn replacing_an_image_invalidates_its_pending_preview() {
+        let generation = std::sync::atomic::AtomicU64::new(12);
+        assert!(preview_generation_is_current(&generation, 12));
+        generation.fetch_add(1, Ordering::Relaxed);
+        assert!(!preview_generation_is_current(&generation, 12));
     }
 
     #[test]

@@ -26,7 +26,7 @@
 # copy of the vendored binaries placed next to the executable so the app
 # resolves them relative to itself rather than through the compile-time source
 # path, which is what makes the staged folder portable.
-/Kraken Upscale.exe
+/Kraken Upscale*.exe
 /ffmpeg/
 /onnxruntime_providers_cuda.dll
 /onnxruntime_providers_shared.dll

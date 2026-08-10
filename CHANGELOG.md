@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — atomic image replacement
+
+- Dropping or opening another still now clears the previous comparison panes
+  immediately instead of leaving the old upscale visible while the new preview
+  is calculated.
+- Pending source, progress, and completed-preview UI callbacks carry a preview
+  generation and re-check it on the UI thread. A superseded image can no longer
+  overwrite either side of the new comparison.
+- Recorded Kraken Art's existing USDU implementation as the behavioral
+  reference for Kraken's future native Generative Refine mode.
+- Rebuilt the release executable (41,363,456 bytes; SHA-256
+  `BCC74A4460F9DA8771158F460A2E66A12017541F3768F281293AD29EDA8C2161`).
+
 ## Unreleased — separate still-image upscaler mode
 
 - Added a persistent Video / Images switch in the main toolbar.

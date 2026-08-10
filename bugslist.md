@@ -18,6 +18,23 @@ Last updated: 2026-08-10
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B46 — Replacing an image could temporarily compare two different sources
+
+- **Where:** image open/drop handling and asynchronous preview delivery
+- **What:** opening a second still updated the source metadata immediately, but
+  left the previous before/after panes visible until the new CUDA preview was
+  ready. A previous worker result that had already queued its UI callback could
+  also arrive after the replacement token changed.
+- **Impact:** Split view could show the new source on one side and the old
+  image's upscale on the other, implying that Kraken had combined two images.
+- **Fix:** a successful image replacement now invalidates pending preview work
+  and clears both panes before loading the new source. Source, progress, and
+  completed-preview callbacks re-check their generation on the UI thread, at
+  the moment they mutate the panes.
+- **Verification:** replacement-token regression coverage, complete release
+  suite, and strict lint pass.
+- [x] B46 — image replacement is atomic and stale preview delivery is rejected
+
 ### B43 — Detail stage was still an image upscaler applied frame by frame
 
 - **Where:** model discovery, preview, and export detail inference

@@ -113,6 +113,22 @@ labelled Generative submode behind the conventional image upscaler, using a
 native self-contained runtime and a complete model bundle. The current release
 does not fake that workflow with an ESRGAN model and a checkpoint filename.
 
+**Kraken Art is the behavioral reference.** The grandfather project at
+`F:\Kraken Art` already implements the intended three-stage USDU workflow in
+`python/pipelines/usdu.py`: target-aware overshoot and tile calculation,
+ESRGAN pre-upscale plus model-specific FLUX/SDXL img2img refinement, then an
+exact-resolution snap. Its Image Upscale UI also exposes ESRGAN/USDU modes,
+checkpoint, VAE, steps, denoise, tile size, CFG, sampler, scheduler, prompt,
+and a deterministic quality finish. That orchestration should be ported rather
+than rediscovered.
+
+The old runtime itself is not reusable here because Kraken Upscale remains a
+self-contained native application. Its current implementation also uses
+independent per-tile seeds and simple feather masks, while its calculated
+seam-fix geometry is not consumed by `run_usdu`. Treat it as the functional
+baseline, then improve continuity with shared spatial noise and an actual seam
+repair pass in the native implementation.
+
 ---
 
 ## 3. Language and GUI

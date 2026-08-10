@@ -81,11 +81,13 @@ These generated payloads are intentionally ignored by Git.
 
 ## Bug audit
 
-All findings through B45 are closed — see [bugslist.md](bugslist.md) and
+All findings through B46 are closed — see [bugslist.md](bugslist.md) and
 [CHANGELOG.md](CHANGELOG.md). B34 was closed as not a defect after measurement
 contradicted it. B43 added genuine multi-frame inference; B44 installed and
 clearly classified the recommended fast video-compatible model families. B45
 added the separate still-image workflow for the existing image models.
+B46 made replacement atomic so a superseded preview cannot be shown beside a
+newly dropped image.
 
 ## Completed reliability pass
 
@@ -204,7 +206,12 @@ A 10-second real sample is at
 7. **Target-format scaling** — HD/2K/4K presets remain designed but unbuilt.
 8. **Generative image refinement** — design as a separate Image submode with a
    complete checkpoint/text-encoder/VAE/denoiser/scheduler bundle and native
-   seam-aware latent tiling. Do not describe a checkpoint alone as runnable.
+   seam-aware latent tiling. Port the orchestration contract from
+   `F:\Kraken Art\python\pipelines\usdu.py`—tile calculation, ESRGAN
+   pre-upscale, img2img refinement, resolution snap, and quality finish—but not
+   its sidecar runtime. Improve its independent tile seeds/simple feathering
+   with shared spatial noise and a real seam-repair pass. Do not describe a
+   checkpoint alone as runnable.
 
 ## Regression assets
 
