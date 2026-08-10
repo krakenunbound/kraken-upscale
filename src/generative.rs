@@ -192,7 +192,7 @@ pub fn refine(
     spec: &ExportSpec,
     canvas: Frame,
     cancel: Arc<AtomicBool>,
-    on_progress: &mut dyn FnMut(u32, u32, &str),
+    on_progress: &mut dyn FnMut(f32, &str),
 ) -> Result<(), String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
@@ -207,12 +207,13 @@ pub fn refine(
         canvas
     };
 
-    on_progress(0, 1, "loading native generative model");
+    on_progress(0.0, "loading native generative model");
     let mut server = NativeServer::start(&spec.package, cancel.as_ref())?;
 
     let tile = spec.refine_tile.clamp(512, 1536).next_multiple_of(64);
     let cells = tile_grid(pred_w, pred_h, tile);
     let total = cells.len() as u32;
+    let refine_started = Instant::now();
     let mut accum = vec![0f32; pred_w as usize * pred_h as usize * 3];
     let mut weights = vec![0f32; pred_w as usize * pred_h as usize];
 
@@ -230,9 +231,36 @@ pub fn refine(
             crop
         };
 
-        let message = format!("generative tile {}/{}", index + 1, total);
-        on_progress(index as u32, total, &message);
+        let message = format!("tile {}/{} · preparing", index + 1, total);
+        on_progress(index as f32 / total.max(1) as f32, &message);
         let tile_seed = spatial_seed(spec.seed, cell.0, cell.1);
+        let mut tile_progress = |step: u32, step_total: u32, tile_elapsed: Duration| {
+            let within = if step_total == 0 {
+                0.0
+            } else {
+                step as f32 / step_total as f32
+            };
+            let overall = (index as f32 + within) / total.max(1) as f32;
+            let elapsed = refine_started.elapsed();
+            let eta = if overall > 0.001 {
+                let remaining = elapsed.mul_f64((1.0 - overall) as f64 / overall as f64);
+                format!(" · ~{} left", compact_duration(remaining))
+            } else {
+                String::new()
+            };
+            let phase = if step_total == 0 {
+                "preparing".to_string()
+            } else {
+                format!("step {step}/{step_total}")
+            };
+            let message = format!(
+                "tile {}/{} · {phase} · {} elapsed{eta}",
+                index + 1,
+                total,
+                compact_duration(tile_elapsed)
+            );
+            on_progress(overall, &message);
+        };
         let mut refined = server.refine_tile(
             &work,
             &spec.prompt,
@@ -241,6 +269,7 @@ pub fn refine(
             tile_seed,
             spec.package.guidance,
             cancel.clone(),
+            &mut tile_progress,
         )?;
         if refined.width != region.2 - region.0 || refined.height != region.3 - region.1 {
             refined = upscale::resample(&refined, region.2 - region.0, region.3 - region.1);
@@ -254,7 +283,8 @@ pub fn refine(
             region,
             TILE_CONTEXT,
         );
-        on_progress(index as u32 + 1, total, &message);
+        let complete = format!("tile {}/{} complete", index + 1, total);
+        on_progress((index + 1) as f32 / total.max(1) as f32, &complete);
     }
 
     let mut refined = finish_blend(&canvas, accum, weights);
@@ -414,6 +444,36 @@ fn spatial_seed(seed: i64, x: u32, y: u32) -> i64 {
         .wrapping_add((y as i64).wrapping_mul(19_349_663))
 }
 
+fn compact_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn diffusion_progress(log: &str, requested_steps: u32) -> Option<(u32, u32)> {
+    let generation = log.rsplit_once("generating image:")?.1;
+    generation
+        .split(['\r', '\n'])
+        .filter_map(|line| {
+            if !line.contains('|') {
+                return None;
+            }
+            let before_rate = line.split_once(" - ")?.0;
+            let ratio = before_rate.split_whitespace().last()?;
+            let (done, total) = ratio.split_once('/')?;
+            let done = done.parse::<u32>().ok()?;
+            let total = total.parse::<u32>().ok()?;
+            (total > 0 && total <= requested_steps && done <= total).then_some((done, total))
+        })
+        .next_back()
+}
+
 fn native_prompt(prompt: &str, guidance: f32) -> String {
     let prompt = if prompt.trim().is_empty() {
         "high detail, faithful textures, preserve composition"
@@ -436,6 +496,20 @@ struct NativeServer {
 
 impl NativeServer {
     fn start(package: &ModelPackage, cancel: &AtomicBool) -> Result<Self, String> {
+        let model_bytes = fs::metadata(&package.diffusion_model)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        if crate::gpu::stats()
+            .map(|stats| stats.vram_total_gb() <= 26.0)
+            .unwrap_or(false)
+            && model_bytes > 18 * 1024 * 1024 * 1024
+        {
+            return Err(format!(
+                "{} is a {:.1} GB diffusion model and is too large for a 24 GB GPU; install the Q6 GGUF package instead",
+                package.name,
+                model_bytes as f64 / 1024.0_f64.powi(3)
+            ));
+        }
         let runtime = runtime_dir().ok_or_else(|| {
             "native generative runtime missing — expected native-diffusion/sd-server.exe beside Kraken"
                 .to_string()
@@ -543,6 +617,7 @@ impl NativeServer {
         seed: i64,
         guidance: f32,
         cancel: Arc<AtomicBool>,
+        on_progress: &mut dyn FnMut(u32, u32, Duration),
     ) -> Result<Frame, String> {
         let png = encode_png(tile)?;
         let prompt = native_prompt(prompt, guidance);
@@ -563,28 +638,30 @@ impl NativeServer {
         let body = serde_json::to_vec(&request)
             .map_err(|error| format!("encoding generative request: {error}"))?;
 
-        let done = Arc::new(AtomicBool::new(false));
-        let watcher_done = done.clone();
-        let watcher_cancel = cancel.clone();
         let pid = self.child.id();
-        let watcher = std::thread::spawn(move || {
-            while !watcher_done.load(Ordering::Relaxed) {
-                if watcher_cancel.load(Ordering::Relaxed) {
+        let port = self.port;
+        let started = Instant::now();
+        let response = std::thread::scope(|scope| {
+            let request = scope.spawn(|| {
+                http_request(port, "POST", "/sdapi/v1/img2img", Some(&body), HTTP_TIMEOUT)
+            });
+            let mut cancelled = false;
+            while !request.is_finished() {
+                if cancel.load(Ordering::Relaxed) && !cancelled {
                     terminate_process_tree(pid);
-                    return;
+                    cancelled = true;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                let progress = fs::read_to_string(&self.log_path)
+                    .ok()
+                    .and_then(|log| diffusion_progress(&log, steps))
+                    .unwrap_or((0, 0));
+                on_progress(progress.0, progress.1, started.elapsed());
+                std::thread::sleep(Duration::from_millis(500));
             }
+            request
+                .join()
+                .map_err(|_| "native generative request thread failed".to_string())?
         });
-        let response = http_request(
-            self.port,
-            "POST",
-            "/sdapi/v1/img2img",
-            Some(&body),
-            HTTP_TIMEOUT,
-        );
-        done.store(true, Ordering::Relaxed);
-        let _ = watcher.join();
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
@@ -776,6 +853,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_live_diffusion_step_progress() {
+        let log = "loading 219/219\r\n[INFO] generating image: 1/1 - seed 0\r\n  |====| 1/2 - 160.77s/it\r  |#####| 780/780 - 2.8GB/s\r  |#####| 25/25 - 1.2it/s\r";
+        assert_eq!(diffusion_progress(log, 15), Some((1, 2)));
+        assert_eq!(diffusion_progress("still loading tensors", 15), None);
+    }
+
+    #[test]
     fn native_prompt_carries_flux_distilled_guidance() {
         let prompt = native_prompt(" preserve the face ", 3.5);
         assert!(prompt.starts_with("preserve the face<sd_cpp_extra_args>"));
@@ -784,28 +868,38 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the complete FLUX package, bundled native runtime, and nearly all GPU VRAM"]
+    #[ignore = "requires the complete FLUX Q6 package, bundled native runtime, and CUDA GPU"]
     fn runs_real_flux_tile_on_cuda() {
         let package = registry().into_iter().next().expect("FLUX package");
         let cancel = Arc::new(AtomicBool::new(false));
         let mut server = NativeServer::start(&package, cancel.as_ref()).expect("server start");
         let frame = Frame {
-            width: 512,
-            height: 512,
-            rgb: vec![96; 512 * 512 * 3],
+            width: 832,
+            height: 832,
+            rgb: vec![96; 832 * 832 * 3],
         };
+        let started = Instant::now();
         let result = server
             .refine_tile(
                 &frame,
                 "faithful subtle photographic detail",
-                2,
+                15,
                 0.10,
                 42,
                 package.guidance,
                 cancel,
+                &mut |done, total, elapsed| {
+                    if total > 0 {
+                        eprintln!(
+                            "FLUX step {done}/{total} after {}",
+                            compact_duration(elapsed)
+                        );
+                    }
+                },
             )
             .expect("FLUX tile");
-        assert_eq!((result.width, result.height), (512, 512));
+        eprintln!("FLUX 832px tile completed in {:?}", started.elapsed());
+        assert_eq!((result.width, result.height), (832, 832));
         let log = fs::read_to_string(&server.log_path).expect("native runtime log");
         assert!(
             log.contains("CUDA"),

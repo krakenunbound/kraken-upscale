@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — visible and practical Generative Refine progress
+
+- Replaced the oversized 23.8 GB FP32 FLUX transformer with city96's pinned,
+  off-the-shelf FLUX.1 Dev Q6_K GGUF. The 9,857,000,736-byte file leaves room
+  for encoders, VAE, and working tensors on the RTX 3090.
+- Reject diffusion transformers larger than 18 GiB on 24 GB-class GPUs instead
+  of silently streaming them through system memory.
+- Generative queue rows now update every half second with model preparation,
+  real diffusion step, tile count, elapsed time, and ETA. Non-diffusion tensor
+  load/VAE counters are filtered out so progress remains monotonic.
+- Measured the representative 832×832, 15-step/0.10 tile at 12.8 seconds on
+  CUDA, down from the roughly 322-second FP32 projection based on its measured
+  160.77 seconds/iteration—about 25× faster.
+
 ## Unreleased — manual GPU memory release
 
 - Added **Release GPU Memory** directly below the System panel's live GPU
@@ -7,9 +21,10 @@
 - The control drops Kraken's retained upscale and RIFE sessions on the export
   worker that owns them, invalidates superseded preview delivery, and reports
   completion in the activity log.
-- The button is disabled during active export instead of terminating a task,
-  and its help text makes clear that allocations belonging to other programs or
-  another Kraken instance cannot be reclaimed from this window.
+- During an active export the action is explicitly labelled **Cancel + Release
+  GPU**. It requests cancellation, terminates the native model process, then
+  drops retained sessions. Its help text makes clear that allocations belonging
+  to other programs or another Kraken instance cannot be reclaimed here.
 
 ## Unreleased — native Generative Refine for still images
 
@@ -41,8 +56,8 @@
   512×512 img2img tile. The server cleaned up after the test and VRAM returned
   to about 0.9 GB used / 23.4 GB free.
 - Built both root launch copies from the final release: `Kraken Upscale.exe`
-  and `Kraken Upscale.new.exe` (42,594,816 bytes; SHA-256
-  `4545F19F013BA6869374D96D0C6F97DF4666EAF1BE2CAF63FCB2D008C35D9FED`).
+  and `Kraken Upscale.new.exe` (42,608,128 bytes; SHA-256
+  `5AC9AE557AF4D50BC77D73D3182A439F4A0CB1965AAA5564C832E255994711D4`).
 
 ## Unreleased — atomic image replacement
 

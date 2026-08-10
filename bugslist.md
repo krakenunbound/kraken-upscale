@@ -18,6 +18,27 @@ Last updated: 2026-08-10
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B49 — Generative export looked frozen and used an unsuitable FP32 model
+
+- **Where:** Generative Refine package, native request progress, queue status
+- **What:** the first deployed FLUX transformer was a 23.8 GB FP32 file. On the
+  24 GB RTX 3090 it left no useful workspace, so the native runtime streamed
+  model layers through system memory. The queue only updated after a whole tile
+  returned, hiding all model loading and diffusion-step activity.
+- **Impact:** fans ran while GPU telemetry stayed low, `tile 1/15` appeared
+  frozen, and a measured diffusion step took about 161 seconds. The projected
+  export was well over an hour.
+- **Fix:** replaced FP32 with the pinned off-the-shelf FLUX.1 Dev Q6_K GGUF,
+  reject >18 GiB diffusion files on 24 GB-class cards, and poll the native log
+  during each request. Queue status now reports tile, real diffusion step,
+  elapsed time, ETA, and model-preparation time. Tensor-loading/VAE counters are
+  excluded so progress cannot jump backward.
+- **Verification:** exact Q6 SHA-256 verified; a real 832×832 CUDA img2img tile
+  at the UI's 15-step/0.10 settings completed in 12.8 seconds versus a roughly
+  322-second FP32 projection from its measured 160.77 seconds/iteration—about
+  25× faster. Step-parser regression and strict lint pass.
+- [x] B49 — responsive generative progress and a 3090-appropriate FLUX package
+
 ### B48 — No manual way to release Kraken's idle GPU allocations
 
 - **Where:** System panel and long-lived export worker
@@ -29,8 +50,10 @@ Last updated: 2026-08-10
 - **Fix:** added **Release GPU Memory** beneath the live GPU telemetry. It
   invalidates superseded preview delivery and tells the owning export worker to
   drop its idle upscale and interpolation sessions on their correct thread.
-  The button is disabled during an active export and explicitly notes that it
-  cannot reclaim memory owned by another application or Kraken instance.
+  During an active export it becomes **Cancel + Release GPU**, requests clean
+  cancellation, stops the native model process, then clears cached sessions.
+  It explicitly notes that it cannot reclaim memory owned by another
+  application or Kraken instance.
 - **Verification:** command wiring compiles through the Slint callback, cache
   ownership remains on the worker thread, and the release path logs completion
   only after both cached sessions have been dropped.

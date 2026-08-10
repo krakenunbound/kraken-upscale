@@ -793,16 +793,22 @@ fn main() -> Result<(), slint::PlatformError> {
         let handle = ui.as_weak();
         let tx = export_tx.clone();
         let preview_generation = preview_generation.clone();
+        let active_cancel = active_cancel.clone();
         ui.on_release_gpu_memory(move || {
             let Some(ui) = handle.upgrade() else { return };
             if ui.get_export_running() {
-                ui.set_preview_status("GPU is busy with an active export".into());
-                return;
+                if let Ok(slot) = active_cancel.lock() {
+                    if let Some(cancel) = slot.as_ref() {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+                ui.set_preview_status("cancelling export and releasing GPU memory…".into());
+            } else {
+                ui.set_preview_status("releasing Kraken GPU caches…".into());
             }
             // Superseded preview output is discarded. Preview sessions are
             // job-local and release themselves when their current pass exits.
             preview_generation.fetch_add(1, Ordering::Relaxed);
-            ui.set_preview_status("releasing Kraken GPU caches…".into());
             if tx.send(ExportCommand::ReleaseGpuMemory).is_err() {
                 ui.set_preview_status("GPU cache worker is unavailable".into());
             }
@@ -2057,22 +2063,10 @@ fn spawn_exporter(
                         match pre_upscaled {
                             Ok(canvas) => {
                                 let progress_handle = handle.clone();
-                                let mut refine_progress =
-                                    move |done: u32, total: u32, message: &str| {
-                                        let fraction = if total == 0 {
-                                            0.15
-                                        } else {
-                                            0.15 + 0.85 * done as f32 / total as f32
-                                        };
-                                        set_task(
-                                            &progress_handle,
-                                            idx,
-                                            fraction,
-                                            message,
-                                            true,
-                                            false,
-                                        );
-                                    };
+                                let mut refine_progress = move |done: f32, message: &str| {
+                                    let fraction = 0.15 + 0.85 * done.clamp(0.0, 1.0);
+                                    set_task(&progress_handle, idx, fraction, message, true, false);
+                                };
                                 generative::refine(
                                     image,
                                     canvas,

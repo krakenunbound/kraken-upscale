@@ -400,17 +400,17 @@ export component MainWindow inherits Window {
 
                                 Btn {
                                     text: root.export-running
-                                        ? "GPU In Use"
+                                        ? "Cancel + Release GPU"
                                         : "Release GPU Memory";
                                     height: 30px;
-                                    enabled: !root.export-running;
                                     clicked => { root.release-gpu-memory(); }
                                 }
 
                                 Help {
                                     lines: 3;
-                                    text: "Drops Kraken's idle model and interpolation caches. "
-                                        + "An active preview finishes first; memory used by other apps is unaffected.";
+                                    text: root.export-running
+                                        ? "Cancels the active export, stops its native model process, then clears Kraken's caches."
+                                        : "Drops Kraken's idle model and interpolation caches. Memory used by other apps is unaffected.";
                                 }
 
                                 StatBox {

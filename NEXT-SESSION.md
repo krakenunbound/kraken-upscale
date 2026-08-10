@@ -44,9 +44,16 @@ recognized, including 2× input rearrangement and 2×/4×/8× native scales.
 
 The System panel now includes **Release GPU Memory**. It drops the export
 worker's idle upscale/RIFE sessions without closing Kraken. Preview sessions
-are already job-local; an active preview finishes and releases itself. The
-button is disabled during export and cannot affect VRAM owned by another
-process.
+are already job-local; an active preview finishes and releases itself. During
+export it becomes **Cancel + Release GPU**, stops the active work first, then
+clears sessions. It cannot affect VRAM owned by another process.
+
+Generative Refine uses the pinned FLUX.1 Dev Q6_K GGUF on the 3090. Do not
+restore the former 23.8 GB FP32 manifest: it forced system-memory layer
+streaming and measured about 161 seconds per diffusion step. Q6 completed the
+representative 832×832 tile at 15 schedule steps / 0.10 denoise in 12.8 seconds.
+The queue polls the native log every 500 ms and reports preparation, actual
+diffusion step, elapsed time, and ETA.
 
 ## Build and run
 
