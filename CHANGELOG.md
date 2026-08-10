@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — separate still-image upscaler mode
+
+- Added a persistent Video / Images switch in the main toolbar.
+- Image mode accepts PNG, JPEG, WebP, BMP, and TIFF through both browse and
+  native window drag/drop; dropping an image automatically switches modes.
+- The model picker is now mode-specific: multi-frame and video-tuned models
+  appear only in Video mode, while the original still-image models appear only
+  in Images mode. Each mode remembers its own model choice.
+- Added native still-image preview through the same CUDA ONNX tiling, color
+  match, detail limit, strength, and resample-last pipeline used by video.
+- Added lossless PNG tasks to the existing queue. Image and video jobs can be
+  mixed without losing their captured model/settings state.
+- Transparent input is handled safely: RGB runs through the neural model while
+  the original alpha plane is Lanczos-resized and restored in the exported PNG.
+- Video-only Source, temporal Stability, timeline, and RIFE controls disappear
+  in Image mode instead of appearing as irrelevant disabled controls.
+- Verified a real CUDA 256×256 → 512×512 transparent PNG export.
+- Rebuilt the root `Kraken Upscale.exe` (41,363,968 bytes; SHA-256
+  `E74BB3178C46788A23BCFB86101BDD461C4DA3DA2E7338586438067BB839A1DB`).
+- This is the conventional ONNX image path. A checkpoint-driven generative
+  tiled refinement path remains a separate future Image submode; it is not
+  implied by this release.
+
 ## Unreleased — curated fast video model set
 
 - Added eight compact video-compatible ONNX choices: Real-ESRGAN General x4v3,

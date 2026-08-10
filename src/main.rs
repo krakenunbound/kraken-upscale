@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +13,7 @@ mod cuda;
 mod dnd;
 mod export;
 mod gpu;
+mod image_mode;
 mod interpolate;
 mod media;
 mod pth;
@@ -70,6 +71,95 @@ struct Job {
     stability: bool,
     lock_strength: f32,
     cut_detect: f32,
+}
+
+#[derive(Clone)]
+struct ImageJob {
+    generation: u64,
+    image: image_mode::ImageInfo,
+    model: upscale::ModelEntry,
+    target_scale: u32,
+    strength: f32,
+    detail_limit: f32,
+    match_color: bool,
+    fp16: bool,
+    tile: u32,
+}
+
+#[derive(Clone)]
+enum TaskSpec {
+    Video(export::ExportSpec),
+    Image(image_mode::ExportSpec),
+}
+
+impl TaskSpec {
+    fn model(&self) -> &upscale::ModelEntry {
+        match self {
+            Self::Video(spec) => &spec.model,
+            Self::Image(spec) => &spec.model,
+        }
+    }
+
+    fn fp16(&self) -> bool {
+        match self {
+            Self::Video(spec) => spec.fp16,
+            Self::Image(spec) => spec.fp16,
+        }
+    }
+
+    fn out_path(&self) -> &std::path::Path {
+        match self {
+            Self::Video(spec) => &spec.out_path,
+            Self::Image(spec) => &spec.out_path,
+        }
+    }
+}
+
+fn model_labels(models: &[upscale::ModelEntry]) -> ModelRc<slint::SharedString> {
+    ModelRc::new(VecModel::from(
+        models
+            .iter()
+            .map(|model| {
+                let scale = if model.scale == 0 {
+                    "auto".to_string()
+                } else {
+                    format!("{}x", model.scale)
+                };
+                slint::SharedString::from(format!("{}  ({scale})", model.display_name()))
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn set_model_picker(ui: &MainWindow, models: &[upscale::ModelEntry], selected: &str) {
+    ui.set_model_names(model_labels(models));
+    let index = models
+        .iter()
+        .position(|model| model.name == selected)
+        .unwrap_or_else(|| upscale::preferred_default(models));
+    ui.set_model_index(index as i32);
+    if let Some(model) = models.get(index) {
+        ui.set_model_note(upscale::guidance(&model.name).into());
+        ui.set_model_is_video(model.is_video());
+        ui.set_model_video_tuned(model.video_tuned);
+    } else {
+        ui.set_model_note("No compatible models are installed for this mode.".into());
+        ui.set_model_is_video(false);
+        ui.set_model_video_tuned(false);
+    }
+}
+
+fn models_for_mode(all: &[upscale::ModelEntry], mode: i32) -> Vec<upscale::ModelEntry> {
+    all.iter()
+        .filter(|model| {
+            if mode == 1 {
+                !model.is_video() && !model.video_tuned
+            } else {
+                model.is_video() || model.video_tuned
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -131,18 +221,18 @@ fn main() -> Result<(), slint::PlatformError> {
 
     spawn_gpu_monitor(ui.as_weak());
 
-    let models = upscale::registry();
-    if models.is_empty() {
+    let all_models = upscale::registry();
+    if all_models.is_empty() {
         ui.set_runtime_state("NO MODELS FOUND".into());
         log(&logger, "no models found — drop .onnx files into models/");
     } else {
-        ui.set_models_count(models.len() as i32);
+        ui.set_models_count(all_models.len() as i32);
         log(
             &logger,
             format!(
                 "{} models: {}",
-                models.len(),
-                models
+                all_models.len(),
+                all_models
                     .iter()
                     .map(|m| m.name.as_str())
                     .collect::<Vec<_>>()
@@ -150,35 +240,40 @@ fn main() -> Result<(), slint::PlatformError> {
             ),
         );
     }
-    ui.set_model_names(ModelRc::new(VecModel::from(
-        models
-            .iter()
-            .map(|m| {
-                let scale = if m.scale == 0 {
-                    "auto".to_string()
-                } else {
-                    format!("{}x", m.scale)
-                };
-                slint::SharedString::from(format!("{}  ({scale})", m.display_name()))
-            })
-            .collect::<Vec<_>>(),
-    )));
+
+    let video_models = Rc::new(models_for_mode(&all_models, 0));
+    let image_models = Rc::new(models_for_mode(&all_models, 1));
 
     // Restore the previous session. The model is stored by name, so it
     // survives files being added to or removed from the models folder;
     // alphabetical order would otherwise put AnimeSharp first, the worst
     // possible default for photographic footage.
     let saved = settings::load();
-    if !models.is_empty() {
-        let idx = models
-            .iter()
-            .position(|m| m.name == saved.model)
-            .unwrap_or_else(|| upscale::preferred_default(&models));
-        ui.set_model_index(idx as i32);
-        ui.set_model_note(upscale::guidance(&models[idx].name).into());
-        ui.set_model_is_video(models[idx].is_video());
-        ui.set_model_video_tuned(models[idx].video_tuned);
-    }
+    let initial_mode = saved.mode_index.clamp(0, 1);
+    ui.set_mode_index(initial_mode);
+    let initial_models = if initial_mode == 0 {
+        video_models.as_ref().clone()
+    } else {
+        image_models.as_ref().clone()
+    };
+    let initial_name = if initial_mode == 0 {
+        if saved.video_model.is_empty() {
+            saved.model.as_str()
+        } else {
+            saved.video_model.as_str()
+        }
+    } else if saved.image_model.is_empty() {
+        saved.model.as_str()
+    } else {
+        saved.image_model.as_str()
+    };
+    set_model_picker(&ui, &initial_models, initial_name);
+    let active_models = Rc::new(RefCell::new(initial_models));
+    let remembered_models = Rc::new(RefCell::new([
+        saved.video_model.clone(),
+        saved.image_model.clone(),
+    ]));
+    let current_mode = Rc::new(Cell::new(initial_mode));
     ui.set_scale_index(saved.scale_index);
     ui.set_strength(saved.strength);
     ui.set_detail_limit(saved.detail_limit);
@@ -220,8 +315,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let clip: Rc<RefCell<Option<media::ClipInfo>>> = Rc::new(RefCell::new(None));
+    let still: Rc<RefCell<Option<image_mode::ImageInfo>>> = Rc::new(RefCell::new(None));
     let preview_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let tx = spawn_preview_worker(ui.as_weak(), preview_generation.clone());
+    let image_tx = spawn_image_preview_worker(ui.as_weak(), preview_generation.clone());
 
     // Source frames decode off the event loop too, or scrubbing freezes the UI.
     let before_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -231,15 +328,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let request = {
         let handle = ui.as_weak();
         let clip = clip.clone();
-        let models = models.clone();
+        let still = still.clone();
+        let active_models = active_models.clone();
         let tx = tx.clone();
+        let image_tx = image_tx.clone();
         let preview_generation = preview_generation.clone();
         move || {
             let ui = handle.unwrap();
-            let Some(info) = clip.borrow().clone() else {
-                return;
-            };
-            let Some(model) = models.get(ui.get_model_index().max(0) as usize).cloned() else {
+            let selected_model = active_models
+                .borrow()
+                .get(ui.get_model_index().max(0) as usize)
+                .cloned();
+            let Some(model) = selected_model else {
                 return;
             };
             ui.set_model_note(upscale::guidance(&model.name).into());
@@ -247,10 +347,53 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_model_video_tuned(model.video_tuned);
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
             ui.set_scale_note(
-                upscale::scale_advice(&model, target_scale, &models)
+                upscale::scale_advice(&model, target_scale, &active_models.borrow())
                     .unwrap_or_default()
                     .into(),
             );
+
+            if ui.get_mode_index() == 1 {
+                let Some(info) = still.borrow().clone() else {
+                    return;
+                };
+                ui.set_out_badge(
+                    format!(
+                        "{} × {} · {}",
+                        info.width * target_scale,
+                        info.height * target_scale,
+                        model.name
+                    )
+                    .into(),
+                );
+                ui.set_preview_status("upscaling image preview…".into());
+                let generation = preview_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                if ui.get_export_running() {
+                    ui.set_preview_status(
+                        "image loaded · preview deferred while export is running".into(),
+                    );
+                    return;
+                }
+                let _ = image_tx.send(ImageJob {
+                    generation,
+                    image: info,
+                    model,
+                    target_scale,
+                    strength: ui.get_strength(),
+                    detail_limit: ui.get_detail_limit(),
+                    match_color: ui.get_match_color(),
+                    fp16: ui.get_fp16(),
+                    tile: if ui.get_auto_tile() {
+                        auto_tile_size
+                    } else {
+                        SAFE_TILE
+                    },
+                });
+                return;
+            }
+
+            let Some(info) = clip.borrow().clone() else {
+                return;
+            };
             let interpolation_fps = ui
                 .get_interp_on()
                 .then(|| interpolate::target_fps(ui.get_interp_index()));
@@ -329,11 +472,48 @@ fn main() -> Result<(), slint::PlatformError> {
     let open = {
         let handle = ui.as_weak();
         let clip = clip.clone();
+        let still = still.clone();
         let request = request.clone();
         let before_tx = before_tx.clone();
         let before_generation = before_generation.clone();
         move |path: std::path::PathBuf| {
             let Some(ui) = handle.upgrade() else { return };
+            let image_path = image_mode::is_supported(&path);
+            if image_path && ui.get_mode_index() != 1 {
+                ui.set_mode_index(1);
+                ui.invoke_mode_changed(1);
+            } else if !image_path && ui.get_mode_index() != 0 {
+                ui.set_mode_index(0);
+                ui.invoke_mode_changed(0);
+            }
+            if ui.get_mode_index() == 1 {
+                match image_mode::probe(&path) {
+                    Ok(info) => {
+                        log(
+                            &ui.as_weak(),
+                            format!(
+                                "opened image {} · {}×{} · {} / {}",
+                                info.file_name(),
+                                info.width,
+                                info.height,
+                                info.codec,
+                                info.pix_fmt
+                            ),
+                        );
+                        load_image(&ui, &info);
+                        *still.borrow_mut() = Some(info);
+                        request();
+                    }
+                    Err(error) => {
+                        log(
+                            &ui.as_weak(),
+                            format!("could not read image {}: {error}", path.display()),
+                        );
+                        ui.set_preview_status(format!("could not read image: {error}").into());
+                    }
+                }
+                return;
+            }
             match media::probe(&path) {
                 Ok(info) => {
                     log(
@@ -379,12 +559,22 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let open = open.clone();
+        let handle = ui.as_weak();
         ui.on_import_clicked(move || {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Video", &["mp4", "mkv", "mov", "avi", "webm", "m2ts", "ts"])
-                .add_filter("All files", &["*"])
-                .pick_file()
-            {
+            let image_mode = handle
+                .upgrade()
+                .map(|ui| ui.get_mode_index() == 1)
+                .unwrap_or(false);
+            let mut dialog = rfd::FileDialog::new();
+            dialog = if image_mode {
+                dialog.add_filter(
+                    "Images",
+                    &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+                )
+            } else {
+                dialog.add_filter("Video", &["mp4", "mkv", "mov", "avi", "webm", "m2ts", "ts"])
+            };
+            if let Some(path) = dialog.add_filter("All files", &["*"]).pick_file() {
                 open(path);
             }
         });
@@ -398,6 +588,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let before_generation = before_generation.clone();
         ui.on_seek(move |pos| {
             let ui = handle.unwrap();
+            if ui.get_mode_index() == 1 {
+                return;
+            }
             if let Some(info) = clip.borrow().as_ref() {
                 // Queued, not decoded here: this runs on the event loop and a
                 // blocking ffmpeg call would freeze the window every scrub step.
@@ -418,15 +611,93 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    {
+        let handle = ui.as_weak();
+        let clip = clip.clone();
+        let still = still.clone();
+        let active_models = active_models.clone();
+        let video_models = video_models.clone();
+        let image_models = image_models.clone();
+        let remembered_models = remembered_models.clone();
+        let current_mode = current_mode.clone();
+        let request = request.clone();
+        let before_tx = before_tx.clone();
+        let before_generation = before_generation.clone();
+        let preview_generation = preview_generation.clone();
+        ui.on_mode_changed(move |requested_mode| {
+            let Some(ui) = handle.upgrade() else { return };
+            let next_mode = requested_mode.clamp(0, 1);
+            let previous_mode = current_mode.replace(next_mode);
+            if let Some(model) = active_models
+                .borrow()
+                .get(ui.get_model_index().max(0) as usize)
+            {
+                remembered_models.borrow_mut()[previous_mode as usize] = model.name.clone();
+            }
+
+            let next_models = if next_mode == 0 {
+                video_models.as_ref().clone()
+            } else {
+                image_models.as_ref().clone()
+            };
+            let selected = remembered_models.borrow()[next_mode as usize].clone();
+            *active_models.borrow_mut() = next_models;
+            set_model_picker(&ui, &active_models.borrow(), &selected);
+
+            preview_generation.fetch_add(1, Ordering::Relaxed);
+            clear_source_display(&ui);
+            if next_mode == 0 {
+                if let Some(info) = clip.borrow().clone() {
+                    load_clip(&ui, &info);
+                    let generation = before_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = before_tx.send(BeforeJob {
+                        generation,
+                        clip: info,
+                        at_secs: 0.0,
+                        treatment: media::SourceTreatment {
+                            content: ui.get_content_index(),
+                            restore: ui.get_restore_index(),
+                            deinterlace: ui.get_detect_fields(),
+                        },
+                        thumbnail: true,
+                    });
+                    request();
+                }
+            } else if let Some(info) = still.borrow().clone() {
+                load_image(&ui, &info);
+                request();
+            }
+
+            settings::save(&collect_settings(
+                &ui,
+                &active_models.borrow(),
+                &remembered_models.borrow(),
+            ));
+            log(
+                &ui.as_weak(),
+                if next_mode == 0 {
+                    "switched to Video mode"
+                } else {
+                    "switched to Image mode"
+                },
+            );
+        });
+    }
+
     // Every control funnels through here, so persistence hangs off the same
     // signal that triggers a re-render.
     {
         let handle = ui.as_weak();
-        let models = models.clone();
+        let active_models = active_models.clone();
+        let remembered_models = remembered_models.clone();
         let request = request.clone();
         ui.on_settings_changed(move || {
             if let Some(ui) = handle.upgrade() {
-                settings::save(&collect_settings(&ui, &models));
+                settings::save(&collect_settings(
+                    &ui,
+                    &active_models.borrow(),
+                    &remembered_models.borrow(),
+                ));
             }
             request();
         });
@@ -450,30 +721,41 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     // ── Export queue ────────────────────────────────────────────────────
-    let queue: Rc<RefCell<Vec<export::ExportSpec>>> = Rc::new(RefCell::new(Vec::new()));
+    let queue: Rc<RefCell<Vec<TaskSpec>>> = Rc::new(RefCell::new(Vec::new()));
     let active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>> = Arc::new(Mutex::new(None));
     let export_tx = spawn_exporter(ui.as_weak(), active_cancel.clone());
 
     {
         let handle = ui.as_weak();
         let clip = clip.clone();
+        let still = still.clone();
         let preview_generation = preview_generation.clone();
         ui.on_clear_video(move || {
             let Some(ui) = handle.upgrade() else { return };
             preview_generation.fetch_add(1, Ordering::Relaxed);
-            clip.borrow_mut().take();
-            ui.set_has_clip(false);
-            ui.set_clip_name("".into());
-            ui.set_clip_specs("".into());
-            ui.set_src_badge("—".into());
-            ui.set_out_badge("—".into());
-            ui.set_source_note("".into());
-            ui.set_preview_status("video cleared".into());
-            ui.set_preview_progress(0.0);
-            ui.set_frame_before(Image::default());
-            ui.set_frame_after(Image::default());
-            ui.set_thumb(Image::default());
-            log(&ui.as_weak(), "current video cleared");
+            let image_mode = ui.get_mode_index() == 1;
+            if image_mode {
+                still.borrow_mut().take();
+            } else {
+                clip.borrow_mut().take();
+            }
+            clear_source_display(&ui);
+            ui.set_preview_status(
+                if image_mode {
+                    "image cleared"
+                } else {
+                    "video cleared"
+                }
+                .into(),
+            );
+            log(
+                &ui.as_weak(),
+                if image_mode {
+                    "current image cleared"
+                } else {
+                    "current video cleared"
+                },
+            );
         });
     }
 
@@ -500,19 +782,75 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let handle = ui.as_weak();
         let clip = clip.clone();
-        let models = models.clone();
+        let still = still.clone();
+        let active_models = active_models.clone();
         let queue = queue.clone();
         ui.on_add_task(move || {
             let ui = handle.unwrap();
-            let Some(info) = clip.borrow().clone() else {
-                return;
-            };
-            let Some(model) = models.get(ui.get_model_index().max(0) as usize).cloned() else {
+            let Some(model) = active_models
+                .borrow()
+                .get(ui.get_model_index().max(0) as usize)
+                .cloned()
+            else {
                 return;
             };
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
             let strength = ui.get_strength();
             let detail_limit = ui.get_detail_limit();
+
+            if ui.get_mode_index() == 1 {
+                let Some(info) = still.borrow().clone() else {
+                    return;
+                };
+                let stem = info
+                    .path
+                    .file_stem()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "image".into());
+                let candidate = info
+                    .path
+                    .with_file_name(format!("{stem}_{target_scale}x_{}.png", model.name));
+                let out_path = unique_output_path(&candidate, &queue.borrow());
+                let spec = image_mode::ExportSpec {
+                    image: info.clone(),
+                    model: model.clone(),
+                    target_scale,
+                    strength,
+                    detail_limit,
+                    match_color: ui.get_match_color(),
+                    fp16: ui.get_fp16(),
+                    tile: if ui.get_auto_tile() {
+                        auto_tile_size
+                    } else {
+                        SAFE_TILE
+                    },
+                    out_path: out_path.clone(),
+                };
+                let (width, height) = spec.output_size();
+                let row = TaskRow {
+                    name: info.file_name().into(),
+                    detail: format!(
+                        "{width}×{height} · {} · lossless PNG · str {strength:.2} · lim {detail_limit:.2}",
+                        model.name
+                    )
+                    .into(),
+                    status: "queued".into(),
+                    path: out_path.display().to_string().into(),
+                    progress: 0.0,
+                    running: false,
+                    failed: false,
+                    done: false,
+                };
+                queue.borrow_mut().push(TaskSpec::Image(spec));
+                if let Some(rows) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
+                    rows.push(row);
+                }
+                return;
+            }
+
+            let Some(info) = clip.borrow().clone() else {
+                return;
+            };
             let interpolation_fps = ui
                 .get_interp_on()
                 .then(|| interpolate::target_fps(ui.get_interp_index()));
@@ -589,7 +927,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 done: false,
             };
 
-            queue.borrow_mut().push(spec);
+            queue.borrow_mut().push(TaskSpec::Video(spec));
             if let Some(vm) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
                 vm.push(row);
             }
@@ -678,7 +1016,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // they're captured here rather than through `settings-changed`.
     {
         let handle = ui.as_weak();
-        let models = models.clone();
+        let active_models = active_models.clone();
+        let remembered_models = remembered_models.clone();
         let active_cancel = active_cancel.clone();
         ui.window().on_close_requested(move || {
             if let Ok(slot) = active_cancel.lock() {
@@ -687,7 +1026,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
             if let Some(ui) = handle.upgrade() {
-                settings::save(&collect_settings(&ui, &models));
+                settings::save(&collect_settings(
+                    &ui,
+                    &active_models.borrow(),
+                    &remembered_models.borrow(),
+                ));
             }
             let _ = slint::quit_event_loop();
             slint::CloseRequestResponse::HideWindow
@@ -1174,12 +1517,187 @@ fn decode_preview_source(
     ))
 }
 
+/// Runs still-image preview inference without any timeline or temporal stages.
+fn spawn_image_preview_worker(
+    handle: slint::Weak<MainWindow>,
+    current_generation: Arc<std::sync::atomic::AtomicU64>,
+) -> Sender<ImageJob> {
+    let (tx, rx) = channel::<ImageJob>();
+
+    std::thread::spawn(move || {
+        let mut loaded: Option<(String, bool, upscale::Engine)> = None;
+        while let Ok(job) = rx.recv() {
+            let job = std::iter::successors(Some(job), |_| rx.try_recv().ok())
+                .last()
+                .unwrap();
+            if current_generation.load(Ordering::Relaxed) != job.generation {
+                continue;
+            }
+
+            let started = std::time::Instant::now();
+            let source = match image_mode::decode(&job.image) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    log(&handle, format!("image preview decode failed: {error}"));
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        format!("image decode failed: {error}"),
+                        None,
+                    );
+                    continue;
+                }
+            };
+
+            if current_generation.load(Ordering::Relaxed) == job.generation {
+                let h = handle.clone();
+                let before = source.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = h.upgrade() {
+                        let image = to_image(&before);
+                        ui.set_frame_before(image.clone());
+                        ui.set_thumb(image);
+                    }
+                });
+            }
+
+            let stale = loaded
+                .as_ref()
+                .map(|(name, half, _)| name != &job.model.name || *half != job.fp16)
+                .unwrap_or(true);
+            if stale {
+                log(
+                    &handle,
+                    format!("image preview: loading {}", job.model.name),
+                );
+                match upscale::Engine::load(&job.model, job.fp16) {
+                    Ok(engine) => {
+                        if engine.window() != 1 {
+                            report_current(
+                                &handle,
+                                &current_generation,
+                                job.generation,
+                                "video-only model cannot be used for images".into(),
+                                None,
+                            );
+                            continue;
+                        }
+                        loaded = Some((job.model.name.clone(), job.fp16, engine));
+                    }
+                    Err(error) => {
+                        log(&handle, format!("image model load failed: {error}"));
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            format!("model load failed: {error}"),
+                            None,
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let Some((_, _, engine)) = loaded.as_mut() else {
+                continue;
+            };
+            if engine.provider() != "CUDA" {
+                report_current(
+                    &handle,
+                    &current_generation,
+                    job.generation,
+                    "GPU runtime unavailable — image preview stopped".into(),
+                    None,
+                );
+                continue;
+            }
+
+            let progress_handle = handle.clone();
+            let progress_generation = current_generation.clone();
+            let wanted = job.generation;
+            let mut on_progress = move |done: u32, total: u32| {
+                if progress_generation.load(Ordering::Relaxed) != wanted {
+                    return;
+                }
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    done as f32 / total as f32
+                };
+                let h = progress_handle.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = h.upgrade() {
+                        ui.set_preview_progress(fraction);
+                    }
+                });
+            };
+
+            let output = engine.run_batch(
+                std::slice::from_ref(&source),
+                job.tile,
+                OVERLAP,
+                &mut on_progress,
+            );
+            match output.and_then(|frames| {
+                frames
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "image model returned no frame".to_string())
+            }) {
+                Ok(model_output) => {
+                    let spec = image_mode::ExportSpec {
+                        image: job.image.clone(),
+                        model: job.model.clone(),
+                        target_scale: job.target_scale,
+                        strength: job.strength,
+                        detail_limit: job.detail_limit,
+                        match_color: job.match_color,
+                        fp16: job.fp16,
+                        tile: job.tile,
+                        out_path: std::path::PathBuf::new(),
+                    };
+                    let final_image = image_mode::finish(&spec, model_output, &source);
+                    let note = format!(
+                        "{} · {}x native → {}x · lossless PNG · {:.1}s on {}",
+                        job.model.name,
+                        engine.scale(),
+                        job.target_scale,
+                        started.elapsed().as_secs_f32(),
+                        engine.provider()
+                    );
+                    log(&handle, format!("image preview completed: {note}"));
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        note,
+                        Some(final_image),
+                    );
+                }
+                Err(error) => {
+                    log(&handle, format!("image preview failed: {error}"));
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        format!("image preview failed: {error}"),
+                        None,
+                    );
+                }
+            }
+        }
+    });
+
+    tx
+}
+
 /// Runs full-clip exports off the UI thread.
 fn spawn_exporter(
     handle: slint::Weak<MainWindow>,
     active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
-) -> Sender<Vec<(usize, export::ExportSpec)>> {
-    let (tx, rx) = channel::<Vec<(usize, export::ExportSpec)>>();
+) -> Sender<Vec<(usize, TaskSpec)>> {
+    let (tx, rx) = channel::<Vec<(usize, TaskSpec)>>();
 
     std::thread::spawn(move || {
         let mut loaded: Option<(String, bool, upscale::Engine)> = None;
@@ -1199,23 +1717,26 @@ fn spawn_exporter(
                 }
                 set_task(&handle, idx, 0.0, "loading model", true, false);
 
+                let model = spec.model().clone();
+                let fp16 = spec.fp16();
+
                 let stale = loaded
                     .as_ref()
-                    .map(|(n, f, _)| n != &spec.model.name || *f != spec.fp16)
+                    .map(|(name, half, _)| name != &model.name || *half != fp16)
                     .unwrap_or(true);
                 if stale {
-                    match upscale::Engine::load(&spec.model, spec.fp16) {
+                    match upscale::Engine::load(&model, fp16) {
                         Ok(u) => {
                             log(
                                 &handle,
                                 format!(
                                     "export: loaded {} ({}x native) on {}",
-                                    spec.model.name,
+                                    model.name,
                                     u.scale(),
                                     u.provider()
                                 ),
                             );
-                            loaded = Some((spec.model.name.clone(), spec.fp16, u));
+                            loaded = Some((model.name.clone(), fp16, u));
                         }
                         Err(e) => {
                             log(&handle, format!("export: model load failed: {e}"));
@@ -1230,13 +1751,17 @@ fn spawn_exporter(
                 if up.provider() != "CUDA" {
                     log(
                         &handle,
-                        "export stopped: GPU runtime unavailable; CPU video processing is disabled",
+                        "export stopped: GPU runtime unavailable; slow CPU processing is disabled",
                     );
                     set_task(&handle, idx, 0.0, "GPU runtime missing", false, true);
                     continue;
                 }
 
-                if spec.interpolation_fps.is_some() && rife_model.is_none() {
+                let needs_rife = matches!(
+                    &spec,
+                    TaskSpec::Video(video) if video.interpolation_fps.is_some()
+                );
+                if needs_rife && rife_model.is_none() {
                     set_task(&handle, idx, 0.0, "loading RIFE", true, false);
                     match interpolate::Rife::load() {
                         Ok(rife) => {
@@ -1254,19 +1779,35 @@ fn spawn_exporter(
                     }
                 }
 
-                log(
-                    &handle,
-                    format!(
-                        "export started: {} · {} frames at {} fps{} · color match {}",
-                        spec.clip.file_name(),
-                        spec.output_frames(),
-                        spec.output_fps(),
-                        spec.interpolation_fps
-                            .map(|_| " · RIFE")
-                            .unwrap_or_default(),
-                        if spec.match_color { "on" } else { "off" }
+                match &spec {
+                    TaskSpec::Video(video) => log(
+                        &handle,
+                        format!(
+                            "video export started: {} · {} frames at {} fps{} · color match {}",
+                            video.clip.file_name(),
+                            video.output_frames(),
+                            video.output_fps(),
+                            video
+                                .interpolation_fps
+                                .map(|_| " · RIFE")
+                                .unwrap_or_default(),
+                            if video.match_color { "on" } else { "off" }
+                        ),
                     ),
-                );
+                    TaskSpec::Image(image) => log(
+                        &handle,
+                        format!(
+                            "image export started: {} · {}×{} → {}×{} · {} · color match {}",
+                            image.image.file_name(),
+                            image.image.width,
+                            image.image.height,
+                            image.output_size().0,
+                            image.output_size().1,
+                            image.model.name,
+                            if image.match_color { "on" } else { "off" }
+                        ),
+                    ),
+                }
 
                 let started = std::time::Instant::now();
                 let progress_handle = handle.clone();
@@ -1313,39 +1854,50 @@ fn spawn_exporter(
                     });
                 };
 
-                match export::run(
-                    &spec,
-                    up,
-                    rife_model.as_mut(),
-                    spec.tile,
-                    OVERLAP,
-                    cancel.clone(),
-                    &mut on_progress,
-                ) {
+                let result = match &spec {
+                    TaskSpec::Video(video) => export::run(
+                        video,
+                        up,
+                        rife_model.as_mut(),
+                        video.tile,
+                        OVERLAP,
+                        cancel.clone(),
+                        &mut on_progress,
+                    )
+                    .map(Some),
+                    TaskSpec::Image(image) => {
+                        image_mode::run(image, up, OVERLAP, cancel.as_ref(), &mut on_progress)
+                            .map(|_| None)
+                    }
+                };
+
+                match result {
                     Ok(stages) => {
                         let wall = started.elapsed();
-                        let mins = wall.as_secs_f32() / 60.0;
+                        let duration = human_duration(wall.as_secs_f64());
                         set_task(
                             &handle,
                             idx,
                             1.0,
-                            &format!("done · {mins:.1} min"),
+                            &format!("done · {duration}"),
                             false,
                             false,
                         );
                         log(
                             &handle,
-                            format!("exported {} in {mins:.1} min", spec.out_path.display()),
+                            format!("exported {} in {duration}", spec.out_path().display()),
                         );
                         // Phase 0 baseline: where the time actually went, so
                         // later pipeline stages have something to be measured
                         // against rather than a single opaque total.
-                        log(&handle, stages.summary(wall));
+                        if let Some(stages) = stages {
+                            log(&handle, stages.summary(wall));
+                        }
                     }
                     Err(e) if e == "cancelled" => {
                         log(
                             &handle,
-                            format!("export cancelled: {}", spec.out_path.display()),
+                            format!("export cancelled: {}", spec.out_path().display()),
                         );
                         set_task(&handle, idx, 0.0, "cancelled", false, false);
                     }
@@ -1525,11 +2077,9 @@ fn human_duration(secs: f64) -> String {
     }
 }
 
-fn unique_output_path(
-    candidate: &std::path::Path,
-    queue: &[export::ExportSpec],
-) -> std::path::PathBuf {
-    let reserved = |p: &std::path::Path| p.exists() || queue.iter().any(|item| item.out_path == p);
+fn unique_output_path(candidate: &std::path::Path, queue: &[TaskSpec]) -> std::path::PathBuf {
+    let reserved =
+        |p: &std::path::Path| p.exists() || queue.iter().any(|item| item.out_path() == p);
     if !reserved(candidate) {
         return candidate.to_path_buf();
     }
@@ -1607,12 +2157,27 @@ fn set_export_running(handle: &slint::Weak<MainWindow>, running: bool) {
 }
 
 /// Snapshots the current control state for persistence.
-fn collect_settings(ui: &MainWindow, models: &[upscale::ModelEntry]) -> settings::Settings {
+fn collect_settings(
+    ui: &MainWindow,
+    models: &[upscale::ModelEntry],
+    remembered: &[String; 2],
+) -> settings::Settings {
+    let current_model = models
+        .get(ui.get_model_index().max(0) as usize)
+        .map(|model| model.name.clone())
+        .unwrap_or_default();
+    let mut video_model = remembered[0].clone();
+    let mut image_model = remembered[1].clone();
+    if ui.get_mode_index() == 0 {
+        video_model = current_model.clone();
+    } else {
+        image_model = current_model.clone();
+    }
     settings::Settings {
-        model: models
-            .get(ui.get_model_index().max(0) as usize)
-            .map(|m| m.name.clone())
-            .unwrap_or_default(),
+        model: current_model,
+        mode_index: ui.get_mode_index(),
+        video_model,
+        image_model,
         scale_index: ui.get_scale_index(),
         strength: ui.get_strength(),
         detail_limit: ui.get_detail_limit(),
@@ -1670,6 +2235,37 @@ fn report_current(
     if current_generation.load(Ordering::Relaxed) == generation {
         report(handle, status, frame);
     }
+}
+
+fn clear_source_display(ui: &MainWindow) {
+    ui.set_has_clip(false);
+    ui.set_clip_name("".into());
+    ui.set_clip_specs("".into());
+    ui.set_src_badge("—".into());
+    ui.set_out_badge("—".into());
+    ui.set_source_note("".into());
+    ui.set_preview_status("".into());
+    ui.set_preview_progress(0.0);
+    ui.set_frame_before(Image::default());
+    ui.set_frame_after(Image::default());
+    ui.set_thumb(Image::default());
+    ui.set_zoom(1.0);
+    ui.set_pan_x(0.0);
+    ui.set_pan_y(0.0);
+}
+
+fn load_image(ui: &MainWindow, info: &image_mode::ImageInfo) {
+    ui.set_clip_name(info.file_name().into());
+    ui.set_clip_specs(info.specs().into());
+    ui.set_src_badge(format!("{} × {} · {}", info.width, info.height, info.codec).into());
+    ui.set_clip_aspect(info.width as f32 / info.height.max(1) as f32);
+    ui.set_clip_duration(0.0);
+    ui.set_clip_fps(0.0);
+    ui.set_playhead(0.0);
+    ui.set_zoom(1.0);
+    ui.set_pan_x(0.0);
+    ui.set_pan_y(0.0);
+    ui.set_has_clip(true);
 }
 
 fn load_clip(ui: &MainWindow, info: &media::ClipInfo) {
@@ -1730,6 +2326,22 @@ mod ui_tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         slint::platform::update_timers_and_animations();
         assert_eq!(ui.get_dock_current_width(), 30.0);
+    }
+
+    #[test]
+    fn video_and_image_modes_have_disjoint_model_lists() {
+        let all = upscale::registry();
+        let video = models_for_mode(&all, 0);
+        let image = models_for_mode(&all, 1);
+        assert!(!video.is_empty(), "video model list");
+        assert!(!image.is_empty(), "image model list");
+        assert!(video
+            .iter()
+            .all(|model| model.is_video() || model.video_tuned));
+        assert!(image
+            .iter()
+            .all(|model| !model.is_video() && !model.video_tuned));
+        assert_eq!(video.len() + image.len(), all.len());
     }
 
     #[test]

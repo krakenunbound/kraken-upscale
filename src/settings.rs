@@ -13,6 +13,10 @@ pub struct Settings {
     /// Stored **by name**, not index: the model list changes as files are
     /// added or removed, and an index would silently select a different model.
     pub model: String,
+    /// 0 = Video, 1 = Image. Kept as an integer to match the UI segment.
+    pub mode_index: i32,
+    pub video_model: String,
+    pub image_model: String,
     pub scale_index: i32,
     pub strength: f32,
     pub detail_limit: f32,
@@ -44,6 +48,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             model: String::new(),
+            mode_index: 0,
+            video_model: String::new(),
+            image_model: String::new(),
             scale_index: 0,
             strength: 1.0,
             detail_limit: 1.0,
@@ -108,5 +115,34 @@ pub fn save(s: &Settings) {
             }
         }
         Err(e) => eprintln!("could not serialise settings: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_default_to_video_mode() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"model":"4x-UltraSharp"}"#).expect("read legacy settings");
+        assert_eq!(settings.mode_index, 0);
+        assert!(settings.video_model.is_empty());
+        assert!(settings.image_model.is_empty());
+    }
+
+    #[test]
+    fn image_mode_and_per_mode_models_round_trip() {
+        let settings = Settings {
+            mode_index: 1,
+            video_model: "NanoVSR-644k (video)".into(),
+            image_model: "4x_foolhardy_Remacri".into(),
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: Settings = serde_json::from_str(&text).expect("restore settings");
+        assert_eq!(restored.mode_index, 1);
+        assert_eq!(restored.video_model, settings.video_model);
+        assert_eq!(restored.image_model, settings.image_model);
     }
 }

@@ -91,6 +91,28 @@ under `models/video-frame/`, labelled as fast frame models, and retain the
 Stability lock. This preserves the useful performance/quality recommendation
 without relabelling single-frame inference as multi-frame VSR.
 
+### 2a. Still images are a separate product mode
+
+The existing ESRGAN/RRDB models remain useful; they were simply in the wrong
+workflow once Video mode was narrowed to video-appropriate choices. Kraken now
+has a separate Images mode that opens still files, filters the model picker to
+still-image models, previews one frame, and exports a lossless PNG. It shares
+the native ONNX/CUDA tile engine and the spatial post-processing controls, but
+does not expose Source cadence, temporal Stability, a timeline, or RIFE.
+
+Transparency is not sent through a three-channel detail model. The source
+alpha plane is resized independently and recombined after RGB inference. This
+keeps logos, sprites, and artwork usable without pretending the detail model
+understands transparency.
+
+**Ultimate SD / checkpoint refinement is not the same stage.** A diffusion
+checkpoint is not an upscale model that can be dropped into the existing NCHW
+contract: it also needs a text encoder, VAE, denoiser, sampler/scheduler,
+conditioning and seam-aware latent tiling. If added, it will be a clearly
+labelled Generative submode behind the conventional image upscaler, using a
+native self-contained runtime and a complete model bundle. The current release
+does not fake that workflow with an ESRGAN model and a checkpoint filename.
+
 ---
 
 ## 3. Language and GUI
@@ -594,6 +616,7 @@ higher output frame rate.
 | `src/upscale.rs` | Model registry, ORT session, tiling, blend/clamp/resample |
 | `src/pth.rs` | Direct RRDBNet checkpoint reader and in-memory graph builder |
 | `src/export.rs` | Streaming decode→model→encode pipeline |
+| `src/image_mode.rs` | Still-image probe, preview decode, CUDA inference, alpha preservation, and PNG export |
 | `src/media.rs` | ffprobe metadata, single-frame decode |
 | `src/gpu.rs` | nvidia-smi telemetry, runtime versions |
 | `src/cuda.rs` | CUDA DLL discovery |

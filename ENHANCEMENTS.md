@@ -147,6 +147,11 @@ Real-ESRGAN General/AnimeVideo, Real-CUGAN, AniSD/OpenProteus/ModernSpanimation.
 They are valuable video-tuned frame models, not temporal models; the picker and
 Stability behavior make that distinction explicit.
 
+Still-image models now have their own Images mode with lossless PNG output and
+alpha preservation. A future Ultimate-style generative path should sit behind
+that conventional pass as an explicit multi-component diffusion pipeline; it
+is not a drop-in replacement for the current ONNX detail graph.
+
 ---
 
 ## 4. Findings by area

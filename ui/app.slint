@@ -41,6 +41,8 @@ export component MainWindow inherits Window {
     in property <string> model-note: "";
     in property <bool> model-is-video: false;
     in property <bool> model-video-tuned: false;
+    // 0 = Video, 1 = Image.
+    in-out property <int> mode-index: 0;
     /// Set when the chosen model's native scale exceeds the requested one.
     in property <string> scale-note: "";
     in-out property <float> strength: 1.0;
@@ -122,6 +124,7 @@ export component MainWindow inherits Window {
     property <bool> col-open: false;
 
     callback import-clicked();
+    callback mode-changed(int);
     callback clear-video();
     callback clear-queue();
     callback seek(float);
@@ -178,6 +181,32 @@ export component MainWindow inherits Window {
                                 font-size: 15px;
                                 font-weight: 300;
                                 letter-spacing: 2.4px;
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        SegBtn {
+                            text: "Video";
+                            width: 66px;
+                            active: root.mode-index == 0;
+                            clicked => {
+                                root.mode-index = 0;
+                                root.mode-changed(0);
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        SegBtn {
+                            text: "Images";
+                            width: 70px;
+                            active: root.mode-index == 1;
+                            clicked => {
+                                root.mode-index = 1;
+                                root.mode-changed(1);
                             }
                         }
                     }
@@ -487,7 +516,7 @@ export component MainWindow inherits Window {
                                 spacing: 16px;
 
                                 Text {
-                                    text: "Drop video here";
+                                    text: root.mode-index == 0 ? "Drop video here" : "Drop image here";
                                     color: root.drop-active ? Pal.accent : Pal.text-dim;
                                     font-size: 19px;
                                     font-weight: 600;
@@ -522,7 +551,9 @@ export component MainWindow inherits Window {
                                 }
 
                                 Text {
-                                    text: "or click to browse  ·  mp4, mkv, mov, avi, webm";
+                                    text: root.mode-index == 0
+                                        ? "or click to browse  ·  mp4, mkv, mov, avi, webm"
+                                        : "or click to browse  ·  png, jpg, webp, bmp, tiff";
                                     color: Pal.text-mute;
                                     font-size: 11.5px;
                                     horizontal-alignment: center;
@@ -841,7 +872,7 @@ export component MainWindow inherits Window {
                     }
 
                     // Transport + timeline
-                    Rectangle {
+                    if root.mode-index == 0: Rectangle {
                         height: 52px;
                         background: Pal.panel;
 
@@ -980,6 +1011,39 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    if root.mode-index == 1: Rectangle {
+                        height: 52px;
+                        background: Pal.panel;
+
+                        Rectangle { height: 1px; background: Pal.line; }
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 10px;
+                            padding-bottom: 10px;
+                            spacing: 12px;
+
+                            Text {
+                                text: root.has-clip
+                                    ? "Still image ready · lossless PNG output"
+                                    : "Import an image to begin";
+                                color: root.has-clip ? Pal.text-dim : Pal.text-mute;
+                                font-size: 11.5px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+
+                            Btn {
+                                text: "Add Image Task";
+                                width: 132px;
+                                primary: true;
+                                enabled: root.has-clip;
+                                clicked => { root.add-task(); }
+                            }
+                        }
+                    }
+
                     // Filmstrip
                     Rectangle {
                         height: 88px;
@@ -1026,7 +1090,7 @@ export component MainWindow inherits Window {
                             Rectangle { width: 1px; background: Pal.line-soft; }
 
                             Text {
-                                text: "No clips loaded";
+                                text: root.mode-index == 0 ? "No clips loaded" : "No images loaded";
                                 color: Pal.text-mute;
                                 font-size: 11.5px;
                                 vertical-alignment: center;
@@ -1077,7 +1141,9 @@ export component MainWindow inherits Window {
                                 Text {
                                     width: 100%;
                                     height: 100%;
-                                    text: "No active export tasks — click \"Add Task\" to queue one.";
+                                    text: root.mode-index == 0
+                                        ? "No active export tasks — click \"Add Task\" to queue one."
+                                        : "No active image tasks — click \"Add Image Task\" to queue one.";
                                     color: Pal.text-mute;
                                     font-size: 11.5px;
                                     horizontal-alignment: center;
@@ -1205,11 +1271,11 @@ export component MainWindow inherits Window {
                     // scroll space, undershooting brings the overlap back.
                     property <length> content-h:
                           140px
-                        + 260px
-                        + (root.src-open ? 210px : 0px)
+                        + (root.mode-index == 0 ? 260px : 70px)
+                        + (root.mode-index == 0 && root.src-open ? 210px : 0px)
                         + (root.det-open ? 470px : 0px)
-                        + (root.stb-open ? 200px : 0px)
-                        + (root.fi-open  ?  90px : 0px)
+                        + (root.mode-index == 0 && root.stb-open ? 200px : 0px)
+                        + (root.mode-index == 0 && root.fi-open  ?  90px : 0px)
                         + (root.col-open ?  60px : 0px);
 
                     Rectangle { width: 1px; background: Pal.line; }
@@ -1232,7 +1298,7 @@ export component MainWindow inherits Window {
                                 spacing: 5px;
 
                                 // ── Video info ──────────────────────────
-                                SectionLabel { text: "VIDEO INFO"; }
+                                SectionLabel { text: root.mode-index == 0 ? "VIDEO INFO" : "IMAGE INFO"; }
 
                                 Card {
                                     height: 62px;
@@ -1265,7 +1331,8 @@ export component MainWindow inherits Window {
 
                                             Text {
                                                 text: root.has-clip ? root.clip-name
-                                                                   : "No video selected";
+                                                    : root.mode-index == 0 ? "No video selected"
+                                                    : "No image selected";
                                                 color: root.has-clip ? Pal.text : Pal.text-mute;
                                                 font-size: 11.5px;
                                                 font-weight: 500;
@@ -1298,12 +1365,13 @@ export component MainWindow inherits Window {
                                 // ── Source ──────────────────────────────
                                 SectionHeader {
                                     title: "Source";
+                                    visible: root.mode-index == 0;
                                     gated: false;
                                     enabled: true;
                                     expanded <=> root.src-open;
                                 }
 
-                                if root.src-open: VerticalLayout {
+                                if root.mode-index == 0 && root.src-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1511,13 +1579,14 @@ export component MainWindow inherits Window {
                                     title: root.model-is-video
                                         ? "Temporal consistency — built into model"
                                         : "Stability — temporal lock";
+                                    visible: root.mode-index == 0;
                                     enabled <=> root.stability-on;
                                     interactive: !root.model-is-video;
                                     expanded <=> root.stb-open;
                                     toggled(v) => { root.settings-changed(); }
                                 }
 
-                                if root.stb-open: VerticalLayout {
+                                if root.mode-index == 0 && root.stb-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1581,13 +1650,14 @@ export component MainWindow inherits Window {
                                     title: root.interp-available ? "Frame Interpolation — RIFE"
                                         : "Frame Interpolation — model missing";
                                     gated: true;
+                                    visible: root.mode-index == 0;
                                     enabled <=> root.interp-on;
                                     interactive: root.interp-available;
                                     expanded <=> root.fi-open;
                                     toggled(v) => { root.settings-changed(); }
                                 }
 
-                                if root.fi-open: VerticalLayout {
+                                if root.mode-index == 0 && root.fi-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1662,14 +1732,18 @@ export component MainWindow inherits Window {
                                     horizontal-stretch: 1;
 
                                     Text {
-                                        text: "Export format (fixed)";
+                                        text: root.mode-index == 0
+                                            ? "Export format (fixed)"
+                                            : "Image export (fixed)";
                                         color: Pal.text;
                                         font-size: 12px;
                                         font-weight: 600;
                                     }
 
                                     Mono {
-                                        text: root.export-summary;
+                                        text: root.mode-index == 0
+                                            ? root.export-summary
+                                            : "png · lossless · full resolution";
                                         color: Pal.text-mute;
                                     }
                                 }
@@ -1677,7 +1751,7 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: "LOCKED";
+                                        text: root.mode-index == 0 ? "LOCKED" : "LOSSLESS";
                                         color: Pal.text-mute;
                                         font-size: 9px;
                                         font-weight: 700;

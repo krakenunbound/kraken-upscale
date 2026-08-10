@@ -24,6 +24,12 @@ Real-CUGAN strengths, AniSD General/Cel SPAN, OpenProteus Compact, and
 ModernSpanimation V1. These remain single-frame graphs and are labelled that
 way. `models/video/` contains genuine neighboring-frame models such as NanoVSR.
 
+The toolbar now has a separate Images mode. It accepts PNG/JPEG/WebP/BMP/TIFF,
+filters the picker to the existing still-image models, previews through the
+native tiled CUDA path, and writes lossless PNG tasks. Alpha is preserved
+separately from RGB inference. Video and image tasks may coexist in the queue,
+and each mode remembers its own selected model.
+
 Both modern ZIP checkpoints and the legacy stream format used by many community
 models are supported. Old ESRGAN and newer RealESRGAN RRDBNet key layouts are
 recognized, including 2× input rearrangement and 2×/4×/8× native scales.
@@ -75,10 +81,11 @@ These generated payloads are intentionally ignored by Git.
 
 ## Bug audit
 
-All findings through B44 are closed — see [bugslist.md](bugslist.md) and
+All findings through B45 are closed — see [bugslist.md](bugslist.md) and
 [CHANGELOG.md](CHANGELOG.md). B34 was closed as not a defect after measurement
 contradicted it. B43 added genuine multi-frame inference; B44 installed and
-clearly classified the recommended fast video-compatible model families.
+clearly classified the recommended fast video-compatible model families. B45
+added the separate still-image workflow for the existing image models.
 
 ## Completed reliability pass
 
@@ -195,6 +202,9 @@ A 10-second real sample is at
    still supports RRDBNet only; RealPLKSR and additional topology builders
    remain optional future work.
 7. **Target-format scaling** — HD/2K/4K presets remain designed but unbuilt.
+8. **Generative image refinement** — design as a separate Image submode with a
+   complete checkpoint/text-encoder/VAE/denoiser/scheduler bundle and native
+   seam-aware latent tiling. Do not describe a checkpoint alone as runnable.
 
 ## Regression assets
 

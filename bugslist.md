@@ -56,6 +56,27 @@ Last updated: 2026-08-10
 - [x] B44 — video-compatible Real-ESRGAN / Real-CUGAN / SPAN set installed,
       distinguished honestly, and GPU-verified
 
+### B45 — Still-image upscalers had no image workflow
+
+- **Where:** application mode, import/drop handling, preview, model picker,
+  queue, and export
+- **What:** the original ESRGAN/RRDB models were retained as "image" models,
+  but Kraken could only open a video and encode MP4. There was no way to use
+  those models on a PNG, JPEG, WebP, BMP, or TIFF.
+- **Impact:** separating video-tuned and still-image models made the taxonomy
+  honest but stranded the entire still-image collection.
+- **Fix:** added a persistent Image mode with image-aware browse and automatic
+  drag/drop routing, image-only model filtering, still preview, mixed queue
+  support, independent clearing, and lossless PNG export. Source alpha is
+  resized separately and restored after RGB inference, so transparent artwork
+  remains transparent. Video-only Source, Stability, and RIFE controls are
+  absent in Image mode.
+- **Verification:** a real CUDA export transformed the transparent 256×256
+  Kraken artwork into a 512×512 PNG with its alpha channel intact. Image
+  probing/decoding, extension routing, model-list separation, settings
+  migration, and mode persistence have regression coverage.
+- [x] B45 — functional conventional Image mode using the existing image models
+
 ## Findings (2026-08-07 audit) — all closed
 
 ### Critical / high
