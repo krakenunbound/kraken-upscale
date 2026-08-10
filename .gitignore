@@ -6,6 +6,12 @@
 /models/*.pth
 /models/interpolation/*.onnx
 /.model-staging/
+/.native-staging/
+/native-diffusion/
+/models/generative/**/*.safetensors
+/models/generative/**/*.sft
+/models/generative/**/*.gguf
+/models/generative/**/*.ckpt
 
 # Redistributable runtime payloads are staged for packaging, not source control.
 /cuda/

@@ -17,6 +17,15 @@ pub struct Settings {
     pub mode_index: i32,
     pub video_model: String,
     pub image_model: String,
+    /// 0 = faithful model-only upscale, 1 = faithful + generative tile refine.
+    pub image_pipeline_index: i32,
+    pub generative_model: String,
+    pub generative_prompt: String,
+    pub generative_denoise: f32,
+    pub generative_steps: i32,
+    pub generative_tile_index: i32,
+    #[serde(default = "default_true")]
+    pub generative_quality_finish: bool,
     pub scale_index: i32,
     pub strength: f32,
     pub detail_limit: f32,
@@ -51,6 +60,13 @@ impl Default for Settings {
             mode_index: 0,
             video_model: String::new(),
             image_model: String::new(),
+            image_pipeline_index: 0,
+            generative_model: String::new(),
+            generative_prompt: "high detail, faithful textures, preserve composition".into(),
+            generative_denoise: 0.10,
+            generative_steps: 15,
+            generative_tile_index: 1,
+            generative_quality_finish: true,
             scale_index: 0,
             strength: 1.0,
             detail_limit: 1.0,
@@ -129,6 +145,7 @@ mod tests {
         assert_eq!(settings.mode_index, 0);
         assert!(settings.video_model.is_empty());
         assert!(settings.image_model.is_empty());
+        assert_eq!(settings.image_pipeline_index, 0);
     }
 
     #[test]
@@ -137,6 +154,9 @@ mod tests {
             mode_index: 1,
             video_model: "NanoVSR-644k (video)".into(),
             image_model: "4x_foolhardy_Remacri".into(),
+            image_pipeline_index: 1,
+            generative_model: "FLUX.1 Dev".into(),
+            generative_denoise: 0.18,
             ..Settings::default()
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");
@@ -144,5 +164,8 @@ mod tests {
         assert_eq!(restored.mode_index, 1);
         assert_eq!(restored.video_model, settings.video_model);
         assert_eq!(restored.image_model, settings.image_model);
+        assert_eq!(restored.image_pipeline_index, 1);
+        assert_eq!(restored.generative_model, "FLUX.1 Dev");
+        assert_eq!(restored.generative_denoise, 0.18);
     }
 }

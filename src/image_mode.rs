@@ -286,6 +286,13 @@ fn write_png(frame: &Frame, alpha: Option<&[u8]>, path: &Path) -> Result<(), Str
     Ok(())
 }
 
+/// Writes a finished RGB image while restoring the source alpha plane at the
+/// final dimensions. Generative refinement deliberately remains RGB-only.
+pub fn write_output(info: &ImageInfo, frame: &Frame, path: &Path) -> Result<(), String> {
+    let alpha = decode_alpha(info, frame.width, frame.height)?;
+    write_png(frame, alpha.as_deref(), path)
+}
+
 pub fn finish(spec: &ExportSpec, model_output: Frame, source: &Frame) -> Frame {
     let colored = if spec.match_color {
         upscale::match_color_to_source(&model_output, source)
@@ -330,8 +337,7 @@ pub fn run(
         return Err("cancelled".into());
     }
     let final_image = finish(spec, output, &source);
-    let alpha = decode_alpha(&spec.image, final_image.width, final_image.height)?;
-    write_png(&final_image, alpha.as_deref(), &spec.out_path)
+    write_output(&spec.image, &final_image, &spec.out_path)
 }
 
 #[cfg(test)]

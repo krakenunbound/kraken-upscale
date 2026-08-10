@@ -1,0 +1,9 @@
+{
+  "name": "FLUX.1 Dev",
+  "architecture": "flux1",
+  "diffusion_model": "FLUX1-Dev/flux_dev.safetensors",
+  "vae": "FLUX1-Dev/ae.safetensors",
+  "clip_l": "FLUX1-Dev/clip_l.safetensors",
+  "t5xxl": "FLUX1-Dev/t5xxl_fp8.safetensors",
+  "guidance": 3.5
+}

@@ -18,6 +18,32 @@ Last updated: 2026-08-10
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B47 — Images mode lacked the checkpoint-driven refine path from Kraken Art
+
+- **Where:** Images mode, export task capture, CUDA runtime packaging
+- **What:** the conventional still-image workflow stopped after its ONNX image
+  model. It could not reproduce Kraken Art's Ultimate-style sequence of a
+  faithful pre-upscale followed by low-denoise FLUX img2img tiles and an exact
+  resolution snap.
+- **Impact:** Images mode could enlarge and sharpen, but it could not use a
+  diffusion checkpoint to reconstruct texture the way the grandfather app or
+  an Ultimate SD Upscale workflow can.
+- **Fix:** added a separate Generative Refine pipeline. It runs the selected
+  conventional model first, releases that CUDA session, starts a bundled
+  native `stable-diffusion.cpp` CUDA server on loopback, refines padded FLUX
+  tiles, blends overlaps with raised-cosine weights, restores source color and
+  alpha, applies an optional restrained finish, snaps to the requested size,
+  and shuts the server down. Complete downloadable model packages are declared
+  by JSON under `models/generative/`; no model conversion or external runtime
+  is required.
+- **Verification:** native runtime device discovery identified the RTX 3090;
+  manifest/package discovery, odd-canvas tile coverage, PNG transport,
+  deterministic spatial seeds, the complete 50-test suite, and strict lint all
+  pass. A live FLUX tile could not be run during this build because the
+  user-open previous release retained 23.8 GB of the 24 GB VRAM; that process
+  was deliberately left untouched.
+- [x] B47 — native Ultimate-style generative still-image pipeline is wired and packaged
+
 ### B46 — Replacing an image could temporarily compare two different sources
 
 - **Where:** image open/drop handling and asynchronous preview delivery

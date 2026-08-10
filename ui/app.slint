@@ -5,7 +5,7 @@ import {
     Rule, PlayGlyph, SearchGlyph, GearGlyph, SplitGlyph, Chevron,
     StatRow, StatBox, VTab
 } from "widgets.slint";
-import { ScrollView } from "std-widgets.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
 
 export struct TaskRow {
     name: string,
@@ -70,6 +70,15 @@ export component MainWindow inherits Window {
     in property <image> frame-after;
     in property <image> thumb;
     in property <[string]> model-names: ["(no models converted)"];
+    in property <[string]> generative-model-names: ["(no complete generative packages)"];
+    in property <bool> generative-runtime-ready: false;
+    in-out property <int> image-pipeline-index: 0;
+    in-out property <int> generative-model-index: 0;
+    in-out property <string> generative-prompt: "high detail, faithful textures, preserve composition";
+    in-out property <float> generative-denoise: 0.10;
+    in-out property <int> generative-steps-index: 1;
+    in-out property <int> generative-tile-index: 1;
+    in-out property <bool> generative-quality-finish: true;
     in property <[TaskRow]> tasks: [];
     in property <[string]> log-lines: [];
     // Left dock: 0 = closed, 1 = logs, 2 = system.
@@ -1026,7 +1035,9 @@ export component MainWindow inherits Window {
 
                             Text {
                                 text: root.has-clip
-                                    ? "Still image ready · lossless PNG output"
+                                    ? root.image-pipeline-index == 1
+                                        ? "Still image ready · faithful upscale + native generative refine"
+                                        : "Still image ready · lossless PNG output"
                                     : "Import an image to begin";
                                 color: root.has-clip ? Pal.text-dim : Pal.text-mute;
                                 font-size: 11.5px;
@@ -1035,10 +1046,11 @@ export component MainWindow inherits Window {
                             }
 
                             Btn {
-                                text: "Add Image Task";
-                                width: 132px;
+                                text: root.image-pipeline-index == 1 ? "Add Refine Task" : "Add Image Task";
+                                width: 138px;
                                 primary: true;
-                                enabled: root.has-clip;
+                                enabled: root.has-clip
+                                    && (root.image-pipeline-index == 0 || root.generative-runtime-ready);
                                 clicked => { root.add-task(); }
                             }
                         }
@@ -1274,6 +1286,7 @@ export component MainWindow inherits Window {
                         + (root.mode-index == 0 ? 260px : 70px)
                         + (root.mode-index == 0 && root.src-open ? 210px : 0px)
                         + (root.det-open ? 470px : 0px)
+                        + (root.mode-index == 1 && root.det-open && root.image-pipeline-index == 1 ? 340px : 0px)
                         + (root.mode-index == 0 && root.stb-open ? 200px : 0px)
                         + (root.mode-index == 0 && root.fi-open  ?  90px : 0px)
                         + (root.col-open ?  60px : 0px);
@@ -1478,6 +1491,28 @@ export component MainWindow inherits Window {
                                         text: "The bundled GPU runtime is required for preview and export; missing GPU support is reported instead of silently rendering very slowly.";
                                     }
 
+                                    if root.mode-index == 1: HorizontalLayout {
+                                        spacing: 6px;
+                                        SegBtn {
+                                            text: "Faithful";
+                                            active: root.image-pipeline-index == 0;
+                                            horizontal-stretch: 1;
+                                            clicked => {
+                                                root.image-pipeline-index = 0;
+                                                root.settings-changed();
+                                            }
+                                        }
+                                        SegBtn {
+                                            text: "Generative Refine";
+                                            active: root.image-pipeline-index == 1;
+                                            horizontal-stretch: 1;
+                                            clicked => {
+                                                root.image-pipeline-index = 1;
+                                                root.settings-changed();
+                                            }
+                                        }
+                                    }
+
                                     FieldRow {
                                         text: "Model";
                                         accent: true;
@@ -1569,6 +1604,83 @@ export component MainWindow inherits Window {
                                         hint: "Uses a larger tile on high-VRAM GPUs. Disable for the conservative 256px tile.";
                                         checked <=> root.auto-tile;
                                         toggled(v) => { root.settings-changed(); }
+                                    }
+
+                                    if root.mode-index == 1 && root.image-pipeline-index == 1: VerticalLayout {
+                                        spacing: 9px;
+
+                                        Rectangle { height: 1px; background: Pal.line-soft; }
+
+                                        Help {
+                                            lines: 3;
+                                            text: root.generative-runtime-ready
+                                                ? "The faithful model runs first. A native FLUX image-to-image pass then refines overlapping tiles. The stage is intentionally export-only because it is much slower than the preview model."
+                                                : "Native generative runtime or a complete model package is missing. Add sd-server beside the app and a manifest under models/generative/.";
+                                            color: root.generative-runtime-ready ? Pal.text-mute : Pal.ember;
+                                        }
+
+                                        FieldRow {
+                                            text: "Refiner";
+                                            accent: true;
+                                            enabled: root.generative-runtime-ready;
+                                            items: root.generative-model-names;
+                                            current <=> root.generative-model-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        FieldLabel { text: "Refine prompt"; }
+                                        Rectangle {
+                                            height: 30px;
+                                            background: Pal.input;
+                                            border-width: 1px;
+                                            border-color: Pal.line;
+                                            border-radius: 3px;
+
+                                            LineEdit {
+                                                x: 6px;
+                                                y: 3px;
+                                                width: parent.width - 12px;
+                                                height: parent.height - 6px;
+                                                text <=> root.generative-prompt;
+                                                placeholder-text: "describe detail while preserving composition";
+                                                accepted => { root.settings-changed(); }
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            text: "Steps";
+                                            items: ["8", "15", "20", "28"];
+                                            current <=> root.generative-steps-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        SliderRow {
+                                            text: "Denoise";
+                                            minimum: 0.05;
+                                            maximum: 0.40;
+                                            value <=> root.generative-denoise;
+                                            released => { root.settings-changed(); }
+                                        }
+
+                                        Help {
+                                            lines: 3;
+                                            text: "0.10 is conservative and close to Kraken Art's default. Higher values invent more detail but can change faces, text, and structure.";
+                                        }
+
+                                        FieldRow {
+                                            text: "Refine tile";
+                                            items: ["512 px", "768 px", "1024 px"];
+                                            current <=> root.generative-tile-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        CheckRow {
+                                            text: "Quality finish";
+                                            hint: "Applies restrained sharpening after tile blending and source-color matching.";
+                                            hint-lines: 2;
+                                            checked <=> root.generative-quality-finish;
+                                            toggled(v) => { root.settings-changed(); }
+                                        }
                                     }
                                 }
 
@@ -1743,7 +1855,9 @@ export component MainWindow inherits Window {
                                     Mono {
                                         text: root.mode-index == 0
                                             ? root.export-summary
-                                            : "png · lossless · full resolution";
+                                            : root.image-pipeline-index == 1
+                                                ? "png · native FLUX tile refine · lossless"
+                                                : "png · lossless · full resolution";
                                         color: Pal.text-mute;
                                     }
                                 }
@@ -1751,7 +1865,8 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: root.mode-index == 0 ? "LOCKED" : "LOSSLESS";
+                                        text: root.mode-index == 0 ? "LOCKED"
+                                            : root.image-pipeline-index == 1 ? "GENERATIVE" : "LOSSLESS";
                                         color: Pal.text-mute;
                                         font-size: 9px;
                                         font-weight: 700;

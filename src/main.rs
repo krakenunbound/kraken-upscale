@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
-use slint::{Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, VecModel};
+use slint::{Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
 mod cuda;
 mod dnd;
 mod export;
+mod generative;
 mod gpu;
 mod image_mode;
 mod interpolate;
@@ -27,6 +28,8 @@ slint::include_modules!();
 
 /// Upscale factors offered by the Scale dropdown.
 const SCALES: [u32; 3] = [2, 3, 4];
+const GENERATIVE_STEPS: [u32; 4] = [8, 15, 20, 28];
+const GENERATIVE_TILES: [u32; 3] = [512, 768, 1024];
 
 /// Preview tiling. Small enough to stay well inside VRAM at 4x, large enough
 /// that per-tile overhead stays irrelevant.
@@ -90,6 +93,7 @@ struct ImageJob {
 enum TaskSpec {
     Video(export::ExportSpec),
     Image(image_mode::ExportSpec),
+    Generative(generative::ExportSpec),
 }
 
 impl TaskSpec {
@@ -97,6 +101,7 @@ impl TaskSpec {
         match self {
             Self::Video(spec) => &spec.model,
             Self::Image(spec) => &spec.model,
+            Self::Generative(spec) => &spec.conventional.model,
         }
     }
 
@@ -104,6 +109,7 @@ impl TaskSpec {
         match self {
             Self::Video(spec) => spec.fp16,
             Self::Image(spec) => spec.fp16,
+            Self::Generative(spec) => spec.conventional.fp16,
         }
     }
 
@@ -111,6 +117,7 @@ impl TaskSpec {
         match self {
             Self::Video(spec) => &spec.out_path,
             Self::Image(spec) => &spec.out_path,
+            Self::Generative(spec) => spec.out_path(),
         }
     }
 }
@@ -243,12 +250,53 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let video_models = Rc::new(models_for_mode(&all_models, 0));
     let image_models = Rc::new(models_for_mode(&all_models, 1));
+    let generative_models = Rc::new(generative::registry());
 
     // Restore the previous session. The model is stored by name, so it
     // survives files being added to or removed from the models folder;
     // alphabetical order would otherwise put AnimeSharp first, the worst
     // possible default for photographic footage.
     let saved = settings::load();
+    let generative_labels: Vec<SharedString> = if generative_models.is_empty() {
+        vec!["(no complete generative packages)".into()]
+    } else {
+        generative_models
+            .iter()
+            .map(|model| format!("{} · {}", model.name, model.architecture).into())
+            .collect()
+    };
+    ui.set_generative_model_names(ModelRc::new(VecModel::from(generative_labels)));
+    let generative_index = generative_models
+        .iter()
+        .position(|model| model.name == saved.generative_model)
+        .unwrap_or(0);
+    ui.set_generative_model_index(generative_index as i32);
+    ui.set_generative_runtime_ready(
+        generative::runtime_available() && !generative_models.is_empty(),
+    );
+    ui.set_image_pipeline_index(saved.image_pipeline_index.clamp(0, 1));
+    ui.set_generative_prompt(saved.generative_prompt.clone().into());
+    ui.set_generative_denoise(saved.generative_denoise.clamp(0.05, 0.40));
+    ui.set_generative_steps_index(
+        GENERATIVE_STEPS
+            .iter()
+            .position(|steps| *steps == saved.generative_steps.max(1) as u32)
+            .unwrap_or(1) as i32,
+    );
+    ui.set_generative_tile_index(saved.generative_tile_index.clamp(0, 2));
+    ui.set_generative_quality_finish(saved.generative_quality_finish);
+    log(
+        &logger,
+        format!(
+            "generative refine: runtime {} · {} complete package(s)",
+            if generative::runtime_available() {
+                "ready"
+            } else {
+                "missing"
+            },
+            generative_models.len()
+        ),
+    );
     let initial_mode = saved.mode_index.clamp(0, 1);
     ui.set_mode_index(initial_mode);
     let initial_models = if initial_mode == 0 {
@@ -626,6 +674,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let video_models = video_models.clone();
         let image_models = image_models.clone();
         let remembered_models = remembered_models.clone();
+        let generative_models = generative_models.clone();
         let current_mode = current_mode.clone();
         let request = request.clone();
         let before_tx = before_tx.clone();
@@ -679,6 +728,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 &ui,
                 &active_models.borrow(),
                 &remembered_models.borrow(),
+                generative_models.as_ref(),
             ));
             log(
                 &ui.as_weak(),
@@ -697,6 +747,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let handle = ui.as_weak();
         let active_models = active_models.clone();
         let remembered_models = remembered_models.clone();
+        let generative_models = generative_models.clone();
         let request = request.clone();
         ui.on_settings_changed(move || {
             if let Some(ui) = handle.upgrade() {
@@ -704,6 +755,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     &ui,
                     &active_models.borrow(),
                     &remembered_models.borrow(),
+                    generative_models.as_ref(),
                 ));
             }
             request();
@@ -791,6 +843,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let clip = clip.clone();
         let still = still.clone();
         let active_models = active_models.clone();
+        let generative_models = generative_models.clone();
         let queue = queue.clone();
         ui.on_add_task(move || {
             let ui = handle.unwrap();
@@ -814,9 +867,29 @@ fn main() -> Result<(), slint::PlatformError> {
                     .file_stem()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "image".into());
+                let generative_package = if ui.get_image_pipeline_index() == 1 {
+                    let package = generative_models
+                        .get(ui.get_generative_model_index().max(0) as usize)
+                        .cloned();
+                    if package.is_none() || !generative::runtime_available() {
+                        ui.set_preview_status(
+                            "native generative runtime or complete model package missing".into(),
+                        );
+                        return;
+                    }
+                    package
+                } else {
+                    None
+                };
+                let suffix = generative_package
+                    .as_ref()
+                    .map(|package| {
+                        format!("{}_Gen-{}", model.name, file_label(&package.name))
+                    })
+                    .unwrap_or_else(|| model.name.clone());
                 let candidate = info
                     .path
-                    .with_file_name(format!("{stem}_{target_scale}x_{}.png", model.name));
+                    .with_file_name(format!("{stem}_{target_scale}x_{suffix}.png"));
                 let out_path = unique_output_path(&candidate, &queue.borrow());
                 let spec = image_mode::ExportSpec {
                     image: info.clone(),
@@ -836,11 +909,23 @@ fn main() -> Result<(), slint::PlatformError> {
                 let (width, height) = spec.output_size();
                 let row = TaskRow {
                     name: info.file_name().into(),
-                    detail: format!(
-                        "{width}×{height} · {} · lossless PNG · str {strength:.2} · lim {detail_limit:.2}",
-                        model.name
-                    )
-                    .into(),
+                    detail: if let Some(package) = generative_package.as_ref() {
+                        format!(
+                            "{width}×{height} · {} → {} generative · denoise {:.2} · {} steps",
+                            model.name,
+                            package.name,
+                            ui.get_generative_denoise(),
+                            GENERATIVE_STEPS[(ui.get_generative_steps_index().max(0) as usize)
+                                .min(GENERATIVE_STEPS.len() - 1)]
+                        )
+                        .into()
+                    } else {
+                        format!(
+                            "{width}×{height} · {} · lossless PNG · str {strength:.2} · lim {detail_limit:.2}",
+                            model.name
+                        )
+                        .into()
+                    },
                     status: "queued".into(),
                     path: out_path.display().to_string().into(),
                     progress: 0.0,
@@ -848,7 +933,24 @@ fn main() -> Result<(), slint::PlatformError> {
                     failed: false,
                     done: false,
                 };
-                queue.borrow_mut().push(TaskSpec::Image(spec));
+                let task = if let Some(package) = generative_package {
+                    TaskSpec::Generative(generative::ExportSpec {
+                        conventional: spec,
+                        package,
+                        prompt: ui.get_generative_prompt().to_string(),
+                        steps: GENERATIVE_STEPS[(ui.get_generative_steps_index().max(0) as usize)
+                            .min(GENERATIVE_STEPS.len() - 1)],
+                        denoise: ui.get_generative_denoise(),
+                        seed: 0,
+                        refine_tile: GENERATIVE_TILES[(ui.get_generative_tile_index().max(0)
+                            as usize)
+                            .min(GENERATIVE_TILES.len() - 1)],
+                        quality_finish: ui.get_generative_quality_finish(),
+                    })
+                } else {
+                    TaskSpec::Image(spec)
+                };
+                queue.borrow_mut().push(task);
                 if let Some(rows) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
                     rows.push(row);
                 }
@@ -1025,6 +1127,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let handle = ui.as_weak();
         let active_models = active_models.clone();
         let remembered_models = remembered_models.clone();
+        let generative_models = generative_models.clone();
         let active_cancel = active_cancel.clone();
         ui.window().on_close_requested(move || {
             if let Ok(slot) = active_cancel.lock() {
@@ -1037,6 +1140,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     &ui,
                     &active_models.borrow(),
                     &remembered_models.borrow(),
+                    generative_models.as_ref(),
                 ));
             }
             let _ = slint::quit_event_loop();
@@ -1076,8 +1180,9 @@ fn main() -> Result<(), slint::PlatformError> {
     Ok(())
 }
 
-/// Runs preview inference off the UI thread. Sessions are expensive to build,
-/// so the loaded model is kept until a different one is asked for.
+/// Runs preview inference off the UI thread. Preview sessions are released
+/// after each result so switching to Generative Refine cannot leave most of
+/// the card reserved by an idle ONNX session.
 fn spawn_preview_worker(
     handle: slint::Weak<MainWindow>,
     current_generation: Arc<std::sync::atomic::AtomicU64>,
@@ -1085,9 +1190,6 @@ fn spawn_preview_worker(
     let (tx, rx) = channel::<Job>();
 
     std::thread::spawn(move || {
-        let mut loaded: Option<(String, bool, upscale::Engine)> = None;
-        let mut rife_model: Option<interpolate::Rife> = None;
-
         while let Ok(job) = rx.recv() {
             // Drain to the newest request — scrubbing and dragging sliders
             // queues jobs faster than they can be served, and only the last
@@ -1101,6 +1203,7 @@ fn spawn_preview_worker(
             }
 
             let started = std::time::Instant::now();
+            let mut rife_model: Option<interpolate::Rife> = None;
 
             let (source, interpolation_note) =
                 match decode_preview_source(&job, &mut rife_model, &handle) {
@@ -1154,67 +1257,55 @@ fn spawn_preview_worker(
                 ),
             );
 
-            let stale = loaded
-                .as_ref()
-                .map(|(n, f, _)| n != &job.model.name || *f != job.fp16)
-                .unwrap_or(true);
-            if stale {
-                log(
-                    &handle,
-                    format!(
-                        "preview: loading {} ({})",
-                        job.model.name,
-                        if job.fp16 { "fp16 preferred" } else { "fp32" }
-                    ),
-                );
-                match upscale::Engine::load(&job.model, job.fp16) {
-                    Ok(u) => {
-                        log(
-                            &handle,
-                            format!(
-                                "loaded {} · {}x native · {} · {}",
-                                job.model.name,
-                                u.scale(),
-                                if job.fp16 { "fp16" } else { "fp32" },
-                                u.provider()
-                            ),
-                        );
-                        // Report what ORT actually registered, not what was
-                        // requested — CUDA can silently fall back.
-                        let h = handle.clone();
-                        let p = u.provider().to_string();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = h.upgrade() {
-                                ui.set_runtime_state(
-                                    if p == "CUDA" {
-                                        "RUNTIME OK"
-                                    } else {
-                                        "CPU FALLBACK"
-                                    }
-                                    .into(),
-                                );
-                                ui.set_rt_provider(p.into());
-                            }
-                        });
-                        loaded = Some((job.model.name.clone(), job.fp16, u));
-                    }
-                    Err(e) => {
-                        log(&handle, format!("model load failed: {e}"));
-                        report_current(
-                            &handle,
-                            &current_generation,
-                            job.generation,
-                            format!("model load failed: {e}"),
-                            None,
-                        );
-                        continue;
-                    }
+            log(
+                &handle,
+                format!(
+                    "preview: loading {} ({})",
+                    job.model.name,
+                    if job.fp16 { "fp16 preferred" } else { "fp32" }
+                ),
+            );
+            let mut up = match upscale::Engine::load(&job.model, job.fp16) {
+                Ok(up) => up,
+                Err(e) => {
+                    log(&handle, format!("model load failed: {e}"));
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        format!("model load failed: {e}"),
+                        None,
+                    );
+                    continue;
                 }
-            }
-
-            let Some((_, _, up)) = loaded.as_mut() else {
-                continue;
             };
+            log(
+                &handle,
+                format!(
+                    "loaded {} · {}x native · {} · {}",
+                    job.model.name,
+                    up.scale(),
+                    if job.fp16 { "fp16" } else { "fp32" },
+                    up.provider()
+                ),
+            );
+            // Report what ORT actually registered, not what was requested —
+            // CUDA can silently fall back.
+            let h = handle.clone();
+            let p = up.provider().to_string();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = h.upgrade() {
+                    ui.set_runtime_state(
+                        if p == "CUDA" {
+                            "RUNTIME OK"
+                        } else {
+                            "CPU FALLBACK"
+                        }
+                        .into(),
+                    );
+                    ui.set_rt_provider(p.into());
+                }
+            });
 
             if up.provider() != "CUDA" {
                 let message = "GPU runtime unavailable — preview stopped instead of running an impractically slow CPU render";
@@ -1532,7 +1623,6 @@ fn spawn_image_preview_worker(
     let (tx, rx) = channel::<ImageJob>();
 
     std::thread::spawn(move || {
-        let mut loaded: Option<(String, bool, upscale::Engine)> = None;
         while let Ok(job) = rx.recv() {
             let job = std::iter::successors(Some(job), |_| rx.try_recv().ok())
                 .last()
@@ -1574,46 +1664,34 @@ fn spawn_image_preview_worker(
                 });
             }
 
-            let stale = loaded
-                .as_ref()
-                .map(|(name, half, _)| name != &job.model.name || *half != job.fp16)
-                .unwrap_or(true);
-            if stale {
-                log(
-                    &handle,
-                    format!("image preview: loading {}", job.model.name),
-                );
-                match upscale::Engine::load(&job.model, job.fp16) {
-                    Ok(engine) => {
-                        if engine.window() != 1 {
-                            report_current(
-                                &handle,
-                                &current_generation,
-                                job.generation,
-                                "video-only model cannot be used for images".into(),
-                                None,
-                            );
-                            continue;
-                        }
-                        loaded = Some((job.model.name.clone(), job.fp16, engine));
-                    }
-                    Err(error) => {
-                        log(&handle, format!("image model load failed: {error}"));
-                        report_current(
-                            &handle,
-                            &current_generation,
-                            job.generation,
-                            format!("model load failed: {error}"),
-                            None,
-                        );
-                        continue;
-                    }
+            log(
+                &handle,
+                format!("image preview: loading {}", job.model.name),
+            );
+            let mut engine = match upscale::Engine::load(&job.model, job.fp16) {
+                Ok(engine) => engine,
+                Err(error) => {
+                    log(&handle, format!("image model load failed: {error}"));
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        format!("model load failed: {error}"),
+                        None,
+                    );
+                    continue;
                 }
-            }
-
-            let Some((_, _, engine)) = loaded.as_mut() else {
-                continue;
             };
+            if engine.window() != 1 {
+                report_current(
+                    &handle,
+                    &current_generation,
+                    job.generation,
+                    "video-only model cannot be used for images".into(),
+                    None,
+                );
+                continue;
+            }
             if engine.provider() != "CUDA" {
                 report_current(
                     &handle,
@@ -1823,6 +1901,22 @@ fn spawn_exporter(
                             if image.match_color { "on" } else { "off" }
                         ),
                     ),
+                    TaskSpec::Generative(image) => log(
+                        &handle,
+                        format!(
+                            "generative image export started: {} · {}×{} → {}×{} · {} pre-upscale → {} native tile refine · denoise {:.2} · {} steps · {}px tiles",
+                            image.conventional.image.file_name(),
+                            image.conventional.image.width,
+                            image.conventional.image.height,
+                            image.output_size().0,
+                            image.output_size().1,
+                            image.conventional.model.name,
+                            image.package.name,
+                            image.denoise,
+                            image.steps,
+                            image.refine_tile
+                        ),
+                    ),
                 }
 
                 let started = std::time::Instant::now();
@@ -1884,6 +1978,65 @@ fn spawn_exporter(
                     TaskSpec::Image(image) => {
                         image_mode::run(image, up, OVERLAP, cancel.as_ref(), &mut on_progress)
                             .map(|_| None)
+                    }
+                    TaskSpec::Generative(image) => {
+                        let progress_handle = handle.clone();
+                        let mut pre_progress = move |done: u64, total: u64| {
+                            let fraction = if total == 0 {
+                                0.0
+                            } else {
+                                0.15 * done as f32 / total as f32
+                            };
+                            set_task(
+                                &progress_handle,
+                                idx,
+                                fraction,
+                                "faithful pre-upscale",
+                                true,
+                                false,
+                            );
+                        };
+                        let pre_upscaled = generative::pre_upscale(
+                            image,
+                            up,
+                            OVERLAP,
+                            cancel.as_ref(),
+                            &mut pre_progress,
+                        );
+                        // The native diffusion model needs nearly the entire
+                        // card. Release the faithful ONNX session before its
+                        // server starts instead of relying on CUDA OOM recovery.
+                        loaded = None;
+                        rife_model = None;
+                        match pre_upscaled {
+                            Ok(canvas) => {
+                                let progress_handle = handle.clone();
+                                let mut refine_progress =
+                                    move |done: u32, total: u32, message: &str| {
+                                        let fraction = if total == 0 {
+                                            0.15
+                                        } else {
+                                            0.15 + 0.85 * done as f32 / total as f32
+                                        };
+                                        set_task(
+                                            &progress_handle,
+                                            idx,
+                                            fraction,
+                                            message,
+                                            true,
+                                            false,
+                                        );
+                                    };
+                                generative::refine(
+                                    image,
+                                    canvas,
+                                    cancel.clone(),
+                                    &mut refine_progress,
+                                )
+                                .map(|_| None)
+                            }
+                            Err(error) => Err(error),
+                        }
                     }
                 };
 
@@ -2093,6 +2246,21 @@ fn human_duration(secs: f64) -> String {
     }
 }
 
+fn file_label(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
 fn unique_output_path(candidate: &std::path::Path, queue: &[TaskSpec]) -> std::path::PathBuf {
     let reserved =
         |p: &std::path::Path| p.exists() || queue.iter().any(|item| item.out_path() == p);
@@ -2177,6 +2345,7 @@ fn collect_settings(
     ui: &MainWindow,
     models: &[upscale::ModelEntry],
     remembered: &[String; 2],
+    generative_models: &[generative::ModelPackage],
 ) -> settings::Settings {
     let current_model = models
         .get(ui.get_model_index().max(0) as usize)
@@ -2194,6 +2363,18 @@ fn collect_settings(
         mode_index: ui.get_mode_index(),
         video_model,
         image_model,
+        image_pipeline_index: ui.get_image_pipeline_index(),
+        generative_model: generative_models
+            .get(ui.get_generative_model_index().max(0) as usize)
+            .map(|model| model.name.clone())
+            .unwrap_or_default(),
+        generative_prompt: ui.get_generative_prompt().to_string(),
+        generative_denoise: ui.get_generative_denoise(),
+        generative_steps: GENERATIVE_STEPS
+            [(ui.get_generative_steps_index().max(0) as usize).min(GENERATIVE_STEPS.len() - 1)]
+            as i32,
+        generative_tile_index: ui.get_generative_tile_index(),
+        generative_quality_finish: ui.get_generative_quality_finish(),
         scale_index: ui.get_scale_index(),
         strength: ui.get_strength(),
         detail_limit: ui.get_detail_limit(),

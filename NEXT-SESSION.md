@@ -30,6 +30,14 @@ native tiled CUDA path, and writes lossless PNG tasks. Alpha is preserved
 separately from RGB inference. Video and image tasks may coexist in the queue,
 and each mode remembers its own selected model.
 
+Images mode now also has a **Generative Refine** submode. It runs the selected
+faithful image model first, drops that CUDA session, then uses a bundled native
+`stable-diffusion.cpp` CUDA server for low-denoise FLUX img2img tiles. Complete
+model bundles are JSON manifests under `models/generative/`; the currently
+staged FLUX.1 Dev package reuses the already-downloaded weights through NTFS
+hardlinks, so it consumes no second 28 GB copy. This remains export-only because
+a diffusion preview would be slow and would misleadingly reserve most VRAM.
+
 Both modern ZIP checkpoints and the legacy stream format used by many community
 models are supported. Old ESRGAN and newer RealESRGAN RRDBNet key layouts are
 recognized, including 2× input rearrangement and 2×/4×/8× native scales.
@@ -61,6 +69,8 @@ models/                          upscale models (.onnx / .pth)
 models/video-frame/              fast video-tuned frame models
 models/video/                    genuine neighboring-frame models
 models/interpolation/            RIFE timestep model
+models/generative/               manifests + complete generative model packages
+native-diffusion/                bundled stable-diffusion.cpp CUDA runtime
 onnxruntime_providers_cuda.dll
 onnxruntime_providers_shared.dll
 ```
@@ -204,14 +214,12 @@ A 10-second real sample is at
    still supports RRDBNet only; RealPLKSR and additional topology builders
    remain optional future work.
 7. **Target-format scaling** — HD/2K/4K presets remain designed but unbuilt.
-8. **Generative image refinement** — design as a separate Image submode with a
-   complete checkpoint/text-encoder/VAE/denoiser/scheduler bundle and native
-   seam-aware latent tiling. Port the orchestration contract from
-   `F:\Kraken Art\python\pipelines\usdu.py`—tile calculation, ESRGAN
-   pre-upscale, img2img refinement, resolution snap, and quality finish—but not
-   its sidecar runtime. Improve its independent tile seeds/simple feathering
-   with shared spatial noise and a real seam-repair pass. Do not describe a
-   checkpoint alone as runnable.
+8. **Generative image refinement** — **implemented** as the separate Images
+   submode using a complete checkpoint/text-encoder/VAE package and bundled
+   native CUDA runtime. Kraken Art's pre-upscale → img2img tiles → exact snap
+   contract is ported. Padded raised-cosine overlap replaces simple feather
+   paste. A second seam-repair pass and shared global latent noise remain
+   quality experiments, not requirements for the shipped first pass.
 
 ## Regression assets
 

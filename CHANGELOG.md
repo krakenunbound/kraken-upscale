@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased — native Generative Refine for still images
+
+- Ported Kraken Art's useful Ultimate-style orchestration into Images mode as
+  a separate **Generative Refine** pipeline: faithful model pre-upscale, tiled
+  low-denoise FLUX img2img refinement, overlap blend, exact resolution snap,
+  and optional quality finish.
+- Added a bundled CUDA `stable-diffusion.cpp` runtime. Kraken starts it only for
+  a generative task on a private loopback port and always terminates it after
+  success, cancellation, or failure. No external scripting runtime or service
+  installation is involved.
+- Added complete model-package discovery under `models/generative/`. A package
+  manifest points at ordinary diffusion, VAE, CLIP-L, and T5 weights; the app
+  rejects incomplete bundles instead of pretending a checkpoint alone is
+  runnable.
+- Added native controls for refiner package, prompt, 8/15/20/28 steps,
+  denoise, 512/768/1024 refine tiles, and quality finish. The task captures all
+  settings when queued.
+- Replaced the grandfather pipeline's simple tile paste with padded context and
+  raised-cosine overlap blending. Tile seeds are deterministic and spatially
+  stable.
+- Image preview CUDA sessions are now released after each preview so the large
+  generative model can claim VRAM for export.
+- Source alpha is restored after refinement, just as in conventional Images
+  mode, and output remains lossless PNG.
+- Added cancellation that terminates the exact native server process tree and
+  preserves its diagnostic log tail on failure.
+- Built `Kraken Upscale.new.exe` in the project root (42,543,616 bytes;
+  SHA-256 `A85650DB51F308DD76663459DF32710EDCABE6DD8A72F34D71D77FF286BC16A2`).
+  The `.new` name preserves the older executable that was still open during
+  packaging.
+
 ## Unreleased — atomic image replacement
 
 - Dropping or opening another still now clears the previous comparison panes

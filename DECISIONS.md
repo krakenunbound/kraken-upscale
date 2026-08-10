@@ -108,26 +108,27 @@ understands transparency.
 **Ultimate SD / checkpoint refinement is not the same stage.** A diffusion
 checkpoint is not an upscale model that can be dropped into the existing NCHW
 contract: it also needs a text encoder, VAE, denoiser, sampler/scheduler,
-conditioning and seam-aware latent tiling. If added, it will be a clearly
-labelled Generative submode behind the conventional image upscaler, using a
-native self-contained runtime and a complete model bundle. The current release
-does not fake that workflow with an ESRGAN model and a checkpoint filename.
+conditioning and seam-aware latent tiling. It is therefore implemented as the
+clearly labelled Generative Refine submode behind the conventional image
+upscaler, using a bundled `stable-diffusion.cpp` CUDA runtime and a complete
+manifested model package. Kraken does not fake that workflow with an ESRGAN
+model and a checkpoint filename.
 
 **Kraken Art is the behavioral reference.** The grandfather project at
-`F:\Kraken Art` already implements the intended three-stage USDU workflow in
+`F:\Kraken Art` implements the behavioral reference three-stage USDU workflow in
 `python/pipelines/usdu.py`: target-aware overshoot and tile calculation,
 ESRGAN pre-upscale plus model-specific FLUX/SDXL img2img refinement, then an
 exact-resolution snap. Its Image Upscale UI also exposes ESRGAN/USDU modes,
 checkpoint, VAE, steps, denoise, tile size, CFG, sampler, scheduler, prompt,
-and a deterministic quality finish. That orchestration should be ported rather
-than rediscovered.
+and a deterministic quality finish. That orchestration has now been ported.
 
 The old runtime itself is not reusable here because Kraken Upscale remains a
 self-contained native application. Its current implementation also uses
 independent per-tile seeds and simple feather masks, while its calculated
 seam-fix geometry is not consumed by `run_usdu`. Treat it as the functional
-baseline, then improve continuity with shared spatial noise and an actual seam
-repair pass in the native implementation.
+baseline. The native first pass already improves the paste with 64-pixel tile
+context and raised-cosine overlap weights. Shared global latent noise and a
+second seam-repair pass remain possible quality experiments.
 
 ---
 
