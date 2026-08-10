@@ -20,6 +20,7 @@ mod settings;
 mod stages;
 mod temporal;
 mod upscale;
+mod video;
 
 slint::include_modules!();
 
@@ -49,6 +50,7 @@ fn to_image(frame: &media::Frame) -> Image {
 }
 
 /// A preview render request handed to the preview worker.
+#[derive(Clone)]
 struct Job {
     generation: u64,
     clip: media::ClipInfo,
@@ -174,6 +176,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .unwrap_or_else(|| upscale::preferred_default(&models));
         ui.set_model_index(idx as i32);
         ui.set_model_note(upscale::guidance(&models[idx].name).into());
+        ui.set_model_is_video(models[idx].is_video());
     }
     ui.set_scale_index(saved.scale_index);
     ui.set_strength(saved.strength);
@@ -239,6 +242,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             ui.set_model_note(upscale::guidance(&model.name).into());
+            ui.set_model_is_video(model.is_video());
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
             ui.set_scale_note(
                 upscale::scale_advice(&model, target_scale, &models)
@@ -296,7 +300,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 generation,
                 clip: info,
                 at_secs,
-                model,
+                model: model.clone(),
                 target_scale,
                 strength: ui.get_strength(),
                 detail_limit: ui.get_detail_limit(),
@@ -313,7 +317,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 } else {
                     SAFE_TILE
                 },
-                stability: ui.get_stability_on(),
+                stability: ui.get_stability_on() && !model.is_video(),
                 lock_strength: ui.get_lock(),
                 cut_detect: ui.get_cut_detect(),
             });
@@ -550,7 +554,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     deinterlace: ui.get_detect_fields(),
                 },
                 match_color: ui.get_match_color(),
-                stability: ui.get_stability_on(),
+                stability: ui.get_stability_on() && !model.is_video(),
                 lock_strength: ui.get_lock(),
                 cut_detect: ui.get_cut_detect(),
                 interpolation_fps,
@@ -729,7 +733,7 @@ fn spawn_preview_worker(
     let (tx, rx) = channel::<Job>();
 
     std::thread::spawn(move || {
-        let mut loaded: Option<(String, bool, upscale::Upscaler)> = None;
+        let mut loaded: Option<(String, bool, upscale::Engine)> = None;
         let mut rife_model: Option<interpolate::Rife> = None;
 
         while let Ok(job) = rx.recv() {
@@ -811,22 +815,22 @@ fn spawn_preview_worker(
                         if job.fp16 { "fp16 preferred" } else { "fp32" }
                     ),
                 );
-                match upscale::Upscaler::load(&job.model, job.fp16) {
+                match upscale::Engine::load(&job.model, job.fp16) {
                     Ok(u) => {
                         log(
                             &handle,
                             format!(
                                 "loaded {} · {}x native · {} · {}",
                                 job.model.name,
-                                u.scale,
+                                u.scale(),
                                 if job.fp16 { "fp16" } else { "fp32" },
-                                u.provider
+                                u.provider()
                             ),
                         );
                         // Report what ORT actually registered, not what was
                         // requested — CUDA can silently fall back.
                         let h = handle.clone();
-                        let p = u.provider.clone();
+                        let p = u.provider().to_string();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = h.upgrade() {
                                 ui.set_runtime_state(
@@ -860,7 +864,7 @@ fn spawn_preview_worker(
                 continue;
             };
 
-            if up.provider != "CUDA" {
+            if up.provider() != "CUDA" {
                 let message = "GPU runtime unavailable — preview stopped instead of running an impractically slow CPU render";
                 log(&handle, message);
                 report_current(
@@ -937,8 +941,58 @@ fn spawn_preview_worker(
                 )
             };
 
-            match up.run(&source, preview_tile, OVERLAP, &mut on_progress) {
-                Ok(out) => {
+            let preview_sources = if up.window() == 1 {
+                vec![source.clone()]
+            } else {
+                let center = up.window() / 2;
+                let step = 1.0
+                    / job
+                        .interpolation_fps
+                        .map(|fps| fps as f64)
+                        .unwrap_or(job.clip.fps)
+                        .max(1.0);
+                let mut frames = Vec::with_capacity(up.window());
+                let mut failed = None;
+                for index in 0..up.window() {
+                    let mut neighbor = job.clone();
+                    neighbor.at_secs = (job.at_secs
+                        + (index as isize - center as isize) as f64 * step)
+                        .clamp(0.0, job.clip.duration.max(job.at_secs));
+                    match decode_preview_source(&neighbor, &mut rife_model, &handle) {
+                        Ok((frame, _)) => frames.push(frame),
+                        Err(e) => {
+                            failed = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failed {
+                    log(&handle, format!("video preview window failed: {e}"));
+                    report_current(
+                        &handle,
+                        &current_generation,
+                        job.generation,
+                        format!("video preview failed: {e}"),
+                        None,
+                    );
+                    continue;
+                }
+                frames
+            };
+            let preview_pick = preview_sources.len() / 2;
+
+            match up.run_batch(&preview_sources, preview_tile, OVERLAP, &mut on_progress) {
+                Ok(outputs) => {
+                    let Some(out) = outputs.into_iter().nth(preview_pick) else {
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            "video preview returned no center frame".into(),
+                            None,
+                        );
+                        continue;
+                    };
                     let mut final_frame = finish(out, &source);
                     let mut lock_note = None;
 
@@ -946,38 +1000,39 @@ fn spawn_preview_worker(
                     // preview renders the preceding one as well. Without this
                     // the Lock and Cut detect sliders can only be judged by
                     // running a full export.
-                    if job.stability && job.at_secs > 0.0 {
+                    if job.stability && up.window() == 1 && job.at_secs > 0.0 {
                         let step = 1.0 / job.clip.fps.max(1.0);
                         let prev_at = (job.at_secs - step).max(0.0);
-                        match media::frame_at_with(
-                            &job.clip,
-                            prev_at,
-                            None,
-                            job.source_treatment,
-                        )
-                        .and_then(|prev_source| {
-                            let prev_out =
-                                up.run(&prev_source, preview_tile, OVERLAP, &mut |_, _| {})?;
-                            let prev_final = finish(prev_out, &prev_source);
-                            let motion = temporal::analyze_with(
-                                &prev_source,
-                                &source,
-                                job.cut_detect,
-                            )?;
-                            let scale =
-                                final_frame.width as f32 / source.width.max(1) as f32;
-                            Ok((
-                                temporal::lock(
-                                    &prev_final,
-                                    &final_frame,
-                                    &motion,
-                                    job.lock_strength,
-                                    scale,
-                                ),
-                                motion.mean_confidence(),
-                                motion.cut,
-                            ))
-                        }) {
+                        match media::frame_at_with(&job.clip, prev_at, None, job.source_treatment)
+                            .and_then(|prev_source| {
+                                let prev_out = up
+                                    .run_batch(
+                                        std::slice::from_ref(&prev_source),
+                                        preview_tile,
+                                        OVERLAP,
+                                        &mut |_, _| {},
+                                    )?
+                                    .into_iter()
+                                    .next()
+                                    .ok_or_else(|| {
+                                        "previous preview returned no frame".to_string()
+                                    })?;
+                                let prev_final = finish(prev_out, &prev_source);
+                                let motion =
+                                    temporal::analyze_with(&prev_source, &source, job.cut_detect)?;
+                                let scale = final_frame.width as f32 / source.width.max(1) as f32;
+                                Ok((
+                                    temporal::lock(
+                                        &prev_final,
+                                        &final_frame,
+                                        &motion,
+                                        job.lock_strength,
+                                        scale,
+                                    ),
+                                    motion.mean_confidence(),
+                                    motion.cut,
+                                ))
+                            }) {
                             Ok((locked, confidence, cut)) => {
                                 final_frame = locked;
                                 lock_note = Some(if cut {
@@ -1018,12 +1073,12 @@ fn spawn_preview_worker(
                     let note = format!(
                         "{} · {}x native → {}x{} · {} · {:.1}s on {}",
                         job.model.name,
-                        up.scale,
+                        up.scale(),
                         job.target_scale,
                         extra,
                         if job.fp16 { "fp16" } else { "fp32" },
                         secs,
-                        up.provider
+                        up.provider()
                     );
                     log(&handle, format!("preview completed: {note}"));
                     report_current(
@@ -1125,7 +1180,7 @@ fn spawn_exporter(
     let (tx, rx) = channel::<Vec<(usize, export::ExportSpec)>>();
 
     std::thread::spawn(move || {
-        let mut loaded: Option<(String, bool, upscale::Upscaler)> = None;
+        let mut loaded: Option<(String, bool, upscale::Engine)> = None;
         let mut rife_model: Option<interpolate::Rife> = None;
 
         while let Ok(batch) = rx.recv() {
@@ -1147,13 +1202,15 @@ fn spawn_exporter(
                     .map(|(n, f, _)| n != &spec.model.name || *f != spec.fp16)
                     .unwrap_or(true);
                 if stale {
-                    match upscale::Upscaler::load(&spec.model, spec.fp16) {
+                    match upscale::Engine::load(&spec.model, spec.fp16) {
                         Ok(u) => {
                             log(
                                 &handle,
                                 format!(
                                     "export: loaded {} ({}x native) on {}",
-                                    spec.model.name, u.scale, u.provider
+                                    spec.model.name,
+                                    u.scale(),
+                                    u.provider()
                                 ),
                             );
                             loaded = Some((spec.model.name.clone(), spec.fp16, u));
@@ -1168,7 +1225,7 @@ fn spawn_exporter(
                 let Some((_, _, up)) = loaded.as_mut() else {
                     continue;
                 };
-                if up.provider != "CUDA" {
+                if up.provider() != "CUDA" {
                     log(
                         &handle,
                         "export stopped: GPU runtime unavailable; CPU video processing is disabled",
@@ -1342,8 +1399,7 @@ fn spawn_before_worker(
                 continue;
             }
 
-            let decoded =
-                media::frame_at_with(&job.clip, job.at_secs, None, job.treatment);
+            let decoded = media::frame_at_with(&job.clip, job.at_secs, None, job.treatment);
             let Ok(frame) = decoded else { continue };
 
             let h = handle.clone();

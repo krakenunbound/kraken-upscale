@@ -163,18 +163,29 @@ A 10-second real sample is at
    GPU tests need the ORT provider DLLs copied from `target/release/` into
    `target/release/deps/`, or they silently fall back to CPU and fail an
    unrelated assertion.
-2. **10-bit pipeline** — **highest value for the actual library.** Decode
+2. **Genuine video super-resolution — first path shipped.**
+   - `models/video/NanoVSR-644k-T5.onnx` consumes five neighboring frames and
+     returns a five-frame 4x sequence; it is not a renamed image model.
+   - Export uses bounded windows and spatial overlap-save tiling. Final partial
+     windows repeat the last frame and discard padding; hard cuts start a new
+     window so recurrent detail cannot leak between shots.
+   - Preview decodes a real temporal neighborhood. The legacy Stability lock is
+     bypassed for video models and remains available for frame models.
+   - Next comparison: RealBasicVSR / BasicVSR++ quality versus this portable,
+     lightweight baseline. Do not count SPAN, CUGAN, DAT2 or RealPLKSR as video
+     models; they remain frame-model/performance work.
+3. **10-bit pipeline** — **highest value for the actual library.** Decode
    `rgb48`, keep precision through the model (which already works in f32/f16),
    encode 10-bit HEVC. Removes both the input quantisation and the 8-bit output
    bottleneck.
-3. **Source restoration** — deinterlace, deblock and **inverse telecine** are
+4. **Source restoration** — deinterlace, deblock and **inverse telecine** are
    active and verified against ground truth. Grain separation and re-injection
    remain, and matter more than expected for film-sourced Blu-rays.
-3. **Performance** — measured larger tiles and parallel post-processing landed;
+5. **Performance** — measured larger tiles and parallel post-processing landed;
    tile batching and optional TensorRT caching remain.
-4. **Broader model families** — SPAN, Compact, and RealPLKSR need their own
+6. **Broader frame-model families** — SPAN, Compact, and RealPLKSR need their own
    native topology builders; current direct checkpoint support is RRDBNet.
-5. **Target-format scaling** — HD/2K/4K presets remain designed but unbuilt.
+7. **Target-format scaling** — HD/2K/4K presets remain designed but unbuilt.
 
 ## Regression assets
 

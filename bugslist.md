@@ -18,6 +18,24 @@ Last updated: 2026-08-07
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B43 — Detail stage was still an image upscaler applied frame by frame
+
+- **Where:** model discovery, preview, and export detail inference
+- **What:** RIFE supplied genuine frame interpolation and the temporal lock
+  reduced shimmer afterward, but the neural detail model still consumed one
+  frame at a time. Calling that equivalent to video super-resolution overstated
+  what the pipeline did.
+- **Impact:** neighboring frames could not contribute detail evidence inside
+  the model; the lock could only retain or release already-invented texture.
+- **Fix:** added a distinct five-dimensional, multi-frame model contract and a
+  genuine bidirectional NanoVSR stage. Preview and export now feed five-frame
+  windows, tile spatially, pad EOF safely, reset at hard cuts, and bypass the
+  frame-model lock. Frame models remain supported as a compatibility mode.
+- **Verification:** real CUDA tensor test passed; a seven-frame export made
+  from `SpaceVoyage_2.mp4` produced all seven frames at the requested 2x output,
+  exercising two windows and the padded EOF path.
+- [x] B43 — genuine multi-frame video super-resolution path
+
 ## Findings (2026-08-07 audit) — all closed
 
 ### Critical / high

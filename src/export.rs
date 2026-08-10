@@ -22,7 +22,9 @@ use crate::interpolate::{self, Rife};
 use crate::media::{self, ClipInfo, Frame};
 use crate::stages::Stages;
 use crate::temporal;
-use crate::upscale::{self, Upscaler};
+#[cfg(test)]
+use crate::upscale::Upscaler;
+use crate::upscale::{self, Engine};
 
 #[derive(Clone)]
 pub struct ExportSpec {
@@ -71,8 +73,7 @@ impl ExportSpec {
     }
 
     fn inverse_telecined(&self) -> bool {
-        self.source_treatment.field_policy(&self.clip)
-            == media::FieldPolicy::InverseTelecine
+        self.source_treatment.field_policy(&self.clip) == media::FieldPolicy::InverseTelecine
     }
 
     pub fn output_fps(&self) -> u32 {
@@ -235,7 +236,7 @@ fn remove_partial(path: &std::path::Path) {
 /// went — the Phase 0 baseline the temporal lock will be measured against.
 pub fn run(
     spec: &ExportSpec,
-    up: &mut Upscaler,
+    up: &mut Engine,
     mut rife: Option<&mut Rife>,
     tile: u32,
     overlap: u32,
@@ -264,9 +265,9 @@ pub fn run(
     // Both children exist from here on, and `Child` does not kill on drop, so
     // no path may return without tearing them down or ffmpeg is left running.
     let teardown = |decoder: &mut Child,
-                        encoder: &mut Child,
-                        decoder_err: &mut Option<JoinHandle<String>>,
-                        encoder_err: &mut Option<JoinHandle<String>>| {
+                    encoder: &mut Child,
+                    decoder_err: &mut Option<JoinHandle<String>>,
+                    encoder_err: &mut Option<JoinHandle<String>>| {
         let _ = decoder.kill();
         let _ = encoder.kill();
         let _ = decoder.wait();
@@ -317,11 +318,11 @@ pub fn run(
     let mut previous: Option<(Frame, Frame)> = None;
 
     let processing = (|| -> Result<(), String> {
-        let mut process_frame = |source: &Frame| -> Result<(), String> {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("cancelled".into());
-            }
-            let out = stages.model(|| up.run(source, tile, overlap, &mut nothing))?;
+        let window = up.window();
+        let apply_lock = spec.stability && window == 1;
+        let mut pending = Vec::<Frame>::with_capacity(window);
+
+        let mut write_frame = |source: &Frame, out: Frame| -> Result<(), String> {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
@@ -349,11 +350,10 @@ pub fn run(
             // pair would be wrong, because interpolated outputs sit at
             // intermediate times and would be warped by too much motion.
             // Covered by `lock_with_interpolation_does_not_regress`.
-            if spec.stability {
+            if apply_lock {
                 if let Some((prev_source, prev_output)) = previous.as_ref() {
                     final_frame = stages.lock(|| -> Result<Frame, String> {
-                        let motion =
-                            temporal::analyze_with(prev_source, source, spec.cut_detect)?;
+                        let motion = temporal::analyze_with(prev_source, source, spec.cut_detect)?;
                         stages.record_confidence(motion.mean_confidence());
                         let scale = final_frame.width as f32 / source.width.max(1) as f32;
                         Ok(temporal::lock(
@@ -393,67 +393,147 @@ pub fn run(
             Ok(())
         };
 
-        let mut read_source = || -> Result<Option<Frame>, String> {
-            if !stages.decode(|| read_frame(&mut src_out, &mut buf))? {
-                return Ok(None);
-            }
-            Ok(Some(Frame {
-                width: sw,
-                height: sh,
-                rgb: std::mem::replace(&mut buf, vec![0u8; frame_bytes]),
-            }))
-        };
-
-        if let Some(target_fps) = spec
-            .interpolation_fps
-            .filter(|fps| *fps as f64 > spec.clip.fps)
+        // Frame models use a one-frame window. A genuine video model waits for
+        // its full NTCHW sequence and returns all corresponding output frames
+        // together. Only this bounded window is retained, never the full clip.
         {
-            let rife = rife.as_deref_mut().ok_or_else(|| {
-                "frame interpolation was enabled but RIFE was not loaded".to_string()
-            })?;
-            let Some(mut left) = read_source()? else {
-                return Err("decoder produced no frames".into());
-            };
-            let source_fps = spec.clip.fps.max(1.0);
-            let target_fps = target_fps as f64;
-            let mut source_index = 0u64;
-            let mut output_index = 0u64;
-
-            while let Some(right) = read_source()? {
-                let interval_end = (source_index + 1) as f64 / source_fps;
-                while output_index < total && output_index as f64 / target_fps < interval_end - 1e-9
+            let mut process_frame = |source: &Frame| -> Result<(), String> {
+                // Never allow recurrent features from one shot to enter the next.
+                // Close and pad the current window before a hard edit, then begin a
+                // fresh temporal context with the new shot.
+                if window > 1
+                    && pending
+                        .last()
+                        .is_some_and(|last| interpolate::is_scene_cut(last, source))
                 {
-                    let output_time = output_index as f64 / target_fps;
-                    let phase =
-                        ((output_time * source_fps) - source_index as f64).clamp(0.0, 1.0) as f32;
-                    if phase <= 0.0001 {
-                        process_frame(&left)?;
-                    } else {
-                        let generated = stages.interpolate(|| -> Result<Frame, String> {
-                            let mut generated = rife.run(&left, &right, phase)?;
-                            if spec.match_color && !interpolate::is_scene_cut(&left, &right) {
-                                let reference = interpolate::color_reference(&left, &right, phase);
-                                generated = upscale::match_color_to_source(&generated, &reference);
-                            }
-                            Ok(generated)
-                        })?;
-                        process_frame(&generated)?;
+                    let real = pending.len();
+                    let last = pending
+                        .last()
+                        .cloned()
+                        .ok_or_else(|| "empty cut window".to_string())?;
+                    while pending.len() < window {
+                        pending.push(last.clone());
                     }
+                    let outputs =
+                        stages.model(|| up.run_batch(&pending, tile, overlap, &mut nothing))?;
+                    for (prior, output) in pending
+                        .iter()
+                        .take(real)
+                        .zip(outputs.into_iter().take(real))
+                    {
+                        write_frame(prior, output)?;
+                    }
+                    pending.clear();
+                }
+                pending.push(source.clone());
+                if pending.len() < window {
+                    return Ok(());
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("cancelled".into());
+                }
+                let outputs =
+                    stages.model(|| up.run_batch(&pending, tile, overlap, &mut nothing))?;
+                if outputs.len() != pending.len() {
+                    return Err(format!(
+                        "detail model returned {} frames for a {}-frame window",
+                        outputs.len(),
+                        pending.len()
+                    ));
+                }
+                for (source, output) in pending.iter().zip(outputs) {
+                    write_frame(source, output)?;
+                }
+                pending.clear();
+                Ok(())
+            };
+
+            let mut read_source = || -> Result<Option<Frame>, String> {
+                if !stages.decode(|| read_frame(&mut src_out, &mut buf))? {
+                    return Ok(None);
+                }
+                Ok(Some(Frame {
+                    width: sw,
+                    height: sh,
+                    rgb: std::mem::replace(&mut buf, vec![0u8; frame_bytes]),
+                }))
+            };
+
+            if let Some(target_fps) = spec
+                .interpolation_fps
+                .filter(|fps| *fps as f64 > spec.clip.fps)
+            {
+                let rife = rife.as_deref_mut().ok_or_else(|| {
+                    "frame interpolation was enabled but RIFE was not loaded".to_string()
+                })?;
+                let Some(mut left) = read_source()? else {
+                    return Err("decoder produced no frames".into());
+                };
+                let source_fps = spec.clip.fps.max(1.0);
+                let target_fps = target_fps as f64;
+                let mut source_index = 0u64;
+                let mut output_index = 0u64;
+
+                while let Some(right) = read_source()? {
+                    let interval_end = (source_index + 1) as f64 / source_fps;
+                    while output_index < total
+                        && output_index as f64 / target_fps < interval_end - 1e-9
+                    {
+                        let output_time = output_index as f64 / target_fps;
+                        let phase = ((output_time * source_fps) - source_index as f64)
+                            .clamp(0.0, 1.0) as f32;
+                        if phase <= 0.0001 {
+                            process_frame(&left)?;
+                        } else {
+                            let generated = stages.interpolate(|| -> Result<Frame, String> {
+                                let mut generated = rife.run(&left, &right, phase)?;
+                                if spec.match_color && !interpolate::is_scene_cut(&left, &right) {
+                                    let reference =
+                                        interpolate::color_reference(&left, &right, phase);
+                                    generated =
+                                        upscale::match_color_to_source(&generated, &reference);
+                                }
+                                Ok(generated)
+                            })?;
+                            process_frame(&generated)?;
+                        }
+                        output_index += 1;
+                    }
+                    left = right;
+                    source_index += 1;
+                }
+
+                // Preserve the source duration without inventing motion beyond the
+                // last available pair.
+                while output_index < total {
+                    process_frame(&left)?;
                     output_index += 1;
                 }
-                left = right;
-                source_index += 1;
+            } else {
+                while let Some(source) = read_source()? {
+                    process_frame(&source)?;
+                }
             }
-
-            // Preserve the source duration without inventing motion beyond the
-            // last available pair.
-            while output_index < total {
-                process_frame(&left)?;
-                output_index += 1;
+        }
+        // The processing closure's mutable borrows are released; pad the final partial
+        // video window by repeating its final frame. Padded outputs are
+        // discarded, preserving the exact clip duration.
+        if !pending.is_empty() {
+            let real = pending.len();
+            let last = pending
+                .last()
+                .cloned()
+                .ok_or_else(|| "empty final video window".to_string())?;
+            while pending.len() < window {
+                pending.push(last.clone());
             }
-        } else {
-            while let Some(source) = read_source()? {
-                process_frame(&source)?;
+            let outputs = stages.model(|| up.run_batch(&pending, tile, overlap, &mut nothing))?;
+            for (source, output) in pending
+                .iter()
+                .take(real)
+                .zip(outputs.into_iter().take(real))
+            {
+                write_frame(source, output)?;
             }
         }
         Ok(())
@@ -527,6 +607,7 @@ mod tests {
                 fp16_file: None,
                 scale: 4,
                 architecture: "rrdb".into(),
+                temporal_frames: 1,
             },
             target_scale: scale,
             strength: 1.0,
@@ -599,8 +680,9 @@ mod tests {
         let run_one = |fp16: bool, tag: &str| {
             let out_path = temp.join(format!("kraken-fp-{tag}-{pid}.mp4"));
             let _ = std::fs::remove_file(&out_path);
-            let mut up = Upscaler::load(&model, fp16).expect("load model");
+            let up = Upscaler::load(&model, fp16).expect("load model");
             assert_eq!(up.provider, "CUDA");
+            let mut up = Engine::Frame(up);
             let spec = ExportSpec {
                 clip: clip.clone(),
                 model: model.clone(),
@@ -678,8 +760,9 @@ mod tests {
             .into_iter()
             .find(|entry| entry.name.contains("UltraSharp"))
             .expect("find UltraSharp");
-        let mut up = Upscaler::load(&model, true).expect("load detail model");
+        let up = Upscaler::load(&model, true).expect("load detail model");
         assert_eq!(up.provider, "CUDA", "baseline must measure the GPU path");
+        let mut up = Engine::Frame(up);
 
         let spec = ExportSpec {
             clip,
@@ -716,7 +799,7 @@ mod tests {
 
         println!("\n=== UNLOCKED BASELINE ===");
         println!("clip     {}x{}", spec.clip.width, spec.clip.height);
-        println!("model    {} ({}x native)", spec.model.name, up.scale);
+        println!("model    {} ({}x native)", spec.model.name, up.scale());
         println!("tile     {}px", spec.tile);
         println!("{}", stages.summary(wall));
         println!("=========================\n");
@@ -778,8 +861,9 @@ mod tests {
         let run_export = |stability: bool, strength: f32, tag: &str| -> (f32, f32) {
             let out_path = temp.join(format!("kraken-lock-{tag}-{pid}.mp4"));
             let _ = std::fs::remove_file(&out_path);
-            let mut up = Upscaler::load(&model, true).expect("load model");
+            let up = Upscaler::load(&model, true).expect("load model");
             assert_eq!(up.provider, "CUDA");
+            let mut up = Engine::Frame(up);
             let spec = ExportSpec {
                 clip: clip.clone(),
                 model: model.clone(),
@@ -910,7 +994,8 @@ mod tests {
         let run_one = |stability: bool, tag: &str| -> f32 {
             let out_path = temp.join(format!("kraken-b34-{tag}-{pid}.mp4"));
             let _ = std::fs::remove_file(&out_path);
-            let mut up = Upscaler::load(&model, true).expect("load model");
+            let up = Upscaler::load(&model, true).expect("load model");
+            let mut up = Engine::Frame(up);
             let mut rife = Rife::load().expect("load RIFE");
             let spec = ExportSpec {
                 clip: clip.clone(),
@@ -991,8 +1076,9 @@ mod tests {
             .into_iter()
             .find(|entry| entry.name == "RealESRGAN_x2")
             .expect("find native 2x detail model");
-        let mut up = Upscaler::load(&model, true).expect("load detail model");
+        let up = Upscaler::load(&model, true).expect("load detail model");
         assert_eq!(up.provider, "CUDA");
+        let mut up = Engine::Frame(up);
         let mut rife = Rife::load().expect("load RIFE model");
         let spec = ExportSpec {
             clip,
@@ -1031,5 +1117,83 @@ mod tests {
 
         let _ = std::fs::remove_file(input);
         let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    #[ignore = "set KRAKEN_TEST_CLIP to verify genuine multi-frame video export"]
+    fn exports_real_video_model_window() {
+        let _ = crate::cuda::prepare();
+        let source = std::env::var_os("KRAKEN_TEST_CLIP")
+            .map(PathBuf::from)
+            .expect("KRAKEN_TEST_CLIP is required");
+        let temp = std::env::temp_dir();
+        let input = temp.join(format!("kraken-vsr-input-{}.mkv", std::process::id()));
+        let output = temp.join(format!("kraken-vsr-output-{}.mp4", std::process::id()));
+        let status = quiet(&mut Command::new(media::ffmpeg()))
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&source)
+            .args([
+                "-frames:v",
+                "7",
+                "-vf",
+                "scale=176:312:flags=lanczos,fps=24",
+                "-an",
+                "-c:v",
+                "ffv1",
+            ])
+            .arg(&input)
+            .status()
+            .expect("create short video-model test clip");
+        assert!(status.success());
+
+        let clip = media::probe(&input).expect("probe short video clip");
+        let model = upscale::registry()
+            .into_iter()
+            .find(|entry| entry.name.contains("NanoVSR"))
+            .expect("find NanoVSR model");
+        let mut engine = Engine::load(&model, true).expect("load video model");
+        assert_eq!(engine.provider(), "CUDA");
+        assert_eq!(engine.window(), 5);
+        let spec = ExportSpec {
+            clip,
+            model,
+            target_scale: 2,
+            strength: 1.0,
+            detail_limit: 1.0,
+            source_treatment: media::SourceTreatment::default(),
+            match_color: true,
+            // Deliberately set: video models must bypass the legacy lock.
+            stability: true,
+            lock_strength: 1.0,
+            cut_detect: 0.4,
+            interpolation_fps: None,
+            fp16: true,
+            tile: 256,
+            out_path: output.clone(),
+            codec: "h264_nvenc".into(),
+            cq: 23,
+        };
+        run(
+            &spec,
+            &mut engine,
+            None,
+            256,
+            16,
+            Arc::new(AtomicBool::new(false)),
+            &mut |_, _| {},
+        )
+        .expect("export genuine video-model clip");
+
+        let result = media::probe(&output).expect("probe video-model output");
+        assert_eq!(result.frames, spec.output_frames());
+        assert_eq!((result.width, result.height), spec.output_size());
+
+        if std::env::var_os("KRAKEN_KEEP_TEST_OUTPUT").is_some() {
+            println!("kept video-model input: {}", input.display());
+            println!("kept video-model output: {}", output.display());
+        } else {
+            let _ = std::fs::remove_file(input);
+            let _ = std::fs::remove_file(output);
+        }
     }
 }

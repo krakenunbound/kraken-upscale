@@ -21,6 +21,20 @@ pub struct ModelEntry {
     pub scale: u32,
     #[serde(default)]
     pub architecture: String,
+    /// Number of neighboring frames consumed together. One means a regular
+    /// image model; values above one select the genuine video-model path.
+    #[serde(default = "single_frame")]
+    pub temporal_frames: u32,
+}
+
+fn single_frame() -> u32 {
+    1
+}
+
+impl ModelEntry {
+    pub fn is_video(&self) -> bool {
+        self.temporal_frames > 1
+    }
 }
 
 /// What each model is actually good for.
@@ -31,7 +45,9 @@ pub struct ModelEntry {
 /// skin.
 pub fn guidance(name: &str) -> &'static str {
     let n = name.to_ascii_lowercase();
-    if n.contains("anime") {
+    if n.contains("nanovsr") {
+        "Genuine multi-frame video super-resolution. Uses neighboring frames together so detail follows motion instead of being reinvented frame by frame. Best on low-resolution live action; the separate Stability filter is bypassed."
+    } else if n.contains("anime") {
         "Trained on line art. On photographic skin it invents dark strokes \
          and hard edges — use only for animation and 2D."
     } else if n.contains("remacri") {
@@ -89,18 +105,20 @@ pub fn preferred_default(models: &[ModelEntry]) -> usize {
     // live-action and AI footage this is aimed at.
     let rank = |m: &ModelEntry| -> u8 {
         let n = m.name.to_ascii_lowercase();
-        if n.contains("remacri") {
+        if m.is_video() {
             0
-        } else if n.contains("ultrasharp") {
+        } else if n.contains("remacri") {
             1
-        } else if n.contains("siax") {
+        } else if n.contains("ultrasharp") {
             2
-        } else if n.contains("realesrgan") {
+        } else if n.contains("siax") {
             3
+        } else if n.contains("realesrgan") {
+            4
         } else if n.contains("anime") || n.contains("faces") {
-            9
+            10
         } else {
-            5
+            6
         }
     };
     models
@@ -132,10 +150,16 @@ pub fn models_dir() -> PathBuf {
 pub fn registry() -> Vec<ModelEntry> {
     let dir = models_dir();
 
-    let meta: Vec<ModelEntry> = std::fs::read_to_string(dir.join("models.json"))
+    let mut meta: Vec<ModelEntry> = std::fs::read_to_string(dir.join("models.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
+
+    if let Ok(text) = std::fs::read_to_string(dir.join("video").join("models.json")) {
+        if let Ok(mut video_meta) = serde_json::from_str::<Vec<ModelEntry>>(&text) {
+            meta.append(&mut video_meta);
+        }
+    }
 
     let Ok(entries) = std::fs::read_dir(&dir) else {
         eprintln!("no models directory at {}", dir.display());
@@ -181,12 +205,105 @@ pub fn registry() -> Vec<ModelEntry> {
             // 0 means "probe it on load" — a dropped-in model has no metadata.
             scale: known.map(|m| m.scale).unwrap_or(0),
             architecture: known.map(|m| m.architecture.clone()).unwrap_or_default(),
+            temporal_frames: known.map(|m| m.temporal_frames).unwrap_or(1),
             name,
         });
     }
 
+    // Video models live in their own folder so interpolation/restoration
+    // graphs are never mistaken for detail models. Their metadata is required:
+    // unlike a 4-D image graph, a 5-D temporal graph cannot be safely guessed.
+    let video_dir = dir.join("video");
+    if let Ok(entries) = std::fs::read_dir(&video_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("onnx") {
+                continue;
+            }
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+            let known = meta.iter().find(|m| {
+                Path::new(&m.file).file_name().and_then(|n| n.to_str()) == Some(file_name.as_ref())
+            });
+            let Some(known) = known else {
+                eprintln!("ignoring video model without metadata: {}", path.display());
+                continue;
+            };
+            if known.temporal_frames <= 1 {
+                eprintln!(
+                    "ignoring video model with invalid temporal window: {}",
+                    path.display()
+                );
+                continue;
+            }
+            let mut model = known.clone();
+            model.file = format!("video/{}", file_name);
+            out.push(model);
+        }
+    }
+
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
+}
+
+/// One loaded detail stage. Frame models remain supported, while video models
+/// receive a real temporal window through the same export/preview workers.
+pub enum Engine {
+    Frame(Upscaler),
+    Video(crate::video::VideoUpscaler),
+}
+
+impl Engine {
+    pub fn load(entry: &ModelEntry, fp16: bool) -> Result<Self, String> {
+        if entry.is_video() {
+            crate::video::VideoUpscaler::load(entry).map(Self::Video)
+        } else {
+            Upscaler::load(entry, fp16).map(Self::Frame)
+        }
+    }
+
+    pub fn scale(&self) -> u32 {
+        match self {
+            Self::Frame(up) => up.scale,
+            Self::Video(up) => up.scale,
+        }
+    }
+
+    pub fn provider(&self) -> &str {
+        match self {
+            Self::Frame(up) => &up.provider,
+            Self::Video(up) => &up.provider,
+        }
+    }
+
+    pub fn window(&self) -> usize {
+        match self {
+            Self::Frame(_) => 1,
+            Self::Video(up) => up.frames,
+        }
+    }
+
+    pub fn effective_tile(&self, requested: u32) -> u32 {
+        match self {
+            Self::Frame(up) => up.effective_tile(requested),
+            Self::Video(up) => up.effective_tile(requested),
+        }
+    }
+
+    pub fn run_batch(
+        &mut self,
+        frames: &[Frame],
+        tile: u32,
+        overlap: u32,
+        on_progress: &mut dyn FnMut(u32, u32),
+    ) -> Result<Vec<Frame>, String> {
+        match self {
+            Self::Frame(up) => frames
+                .iter()
+                .map(|frame| up.run(frame, tile, overlap, on_progress))
+                .collect(),
+            Self::Video(up) => up.run(frames, tile, overlap, on_progress),
+        }
+    }
 }
 
 fn build(path: &Path, providers: Vec<ExecutionProviderDispatch>) -> Result<Session, String> {
@@ -694,6 +811,7 @@ mod tests {
             fp16_file: None,
             scale,
             architecture: "rrdb".into(),
+            temporal_frames: 1,
         }
     }
 
@@ -710,7 +828,10 @@ mod tests {
 
         let advice = scale_advice(&entry("Big", 4), 2, &installed).expect("warns");
         assert!(advice.contains("~4x the work"), "{advice}");
-        assert!(advice.contains("Small"), "should name the native option: {advice}");
+        assert!(
+            advice.contains("Small"),
+            "should name the native option: {advice}"
+        );
     }
 
     #[test]

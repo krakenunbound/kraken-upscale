@@ -1,0 +1,9 @@
+[
+  {
+    "name": "NanoVSR-644k (video)",
+    "file": "NanoVSR-644k-T5.onnx",
+    "scale": 4,
+    "architecture": "NanoVSR",
+    "temporal_frames": 5
+  }
+]

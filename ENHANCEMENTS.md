@@ -15,13 +15,18 @@ Spatial detail is already in the right league (Remacri, UltraSharp, RealESRGAN, 
 
 To get as good as the pros:
 
-1. **Make invented detail hold still across frames** (temporal lock) — **do this first**.
-2. **Finish broadcast source restoration** (IVTC, grain separation/re-injection).
-3. **Then** pay down the speed tax (tile batching, TensorRT, native-scale matching, SPAN/Compact).
+1. **Use a genuine multi-frame detail model** so neighboring frames inform the
+   neural upscale itself — NanoVSR is the first shipped path.
+2. Keep the **temporal lock as a compatibility bridge** for frame-only models.
+3. Finish source precision/grain work, then pay down the remaining speed tax
+   (TensorRT and broader model families).
 
 > From DECISIONS §2: *The gap between a good image upscaler and a good video upscaler is temporal, not spatial.*
 
-Strong per-frame models **increase** shimmer if each frame reinvents texture independently. Temporal constraint must be model-agnostic and written once in the pipeline.
+Strong per-frame models **increase** shimmer if each frame reinvents texture
+independently. A motion-guided lock reduces that failure, but a learned
+multi-frame VSR model is the primary solution because it aggregates temporal
+evidence before detail is created.
 
 ---
 
@@ -128,7 +133,7 @@ cargo test --release fp16_versus_fp32 -- --ignored --nocapture
 | Capability | Topaz / peers | Kraken today | Gap |
 |---|---|---|---|
 | Per-frame detail | Specialized models | Strong open ESRGAN-family | Small on stills |
-| Temporal stability | Flow / recurrent / video models | **None** (Stability UI disabled) | **Largest quality gap** |
+| Temporal stability | Flow / recurrent / video models | **NanoVSR multi-frame path + compatibility lock** | First genuine VSR model shipped; broader quality models remain |
 | Source restoration | IVTC, deinterlace, denoise, grain | Partial: bwdif + deblock/bilateral | Medium (broadcast) |
 | Grain handling | Separate / re-inject | Planned only | Medium |
 | Speed | Light nets + TRT / custom CUDA | CUDA EP, serial tiles, heavy RRDB | **Largest speed gap** |

@@ -64,18 +64,23 @@ re-invents pores, fabric weave and foliage 24 times a second, and the surface
 appears to boil. The better the model, the worse the boiling: a weak upscaler
 adds little and stays calm, a strong one adds gorgeous detail that shimmers.
 
-Consequence for the architecture: this is **not** "pick a video model instead of
-an image model". It is:
+**Correction, 2026-08-10:** a post-model temporal constraint is useful, but it
+is not equivalent to a learned video super-resolution model. The primary path
+should consume neighboring frames inside the neural detail stage so motion and
+detail are learned together. The architecture is now two explicit modes:
 
-> strong image model for detail → temporal constraint so it holds still
+> multi-frame video model (preferred) → post-processing
+>
+> compatible image model → optional motion-guided temporal lock → post-processing
 
-The constraint (planned, not yet built) computes optical flow between source
-frames, warps the *previous output* forward along that flow, and where the flow
-is reliable holds the previously invented detail instead of letting the model
-re-invent it. At occlusions and scene cuts it falls back to fresh output.
+NanoVSR-644k is the first genuine video model. It consumes five frames as one
+NTCHW tensor, propagates features forward and backward, and returns five 4x
+frames. Long clips remain streamable through bounded windows; hard cuts close
+and pad the current window so recurrent features never cross between shots.
 
-This is written once in the pipeline and is independent of which model runs.
-It is also the part every cheap tool skips, which is why they all shimmer.
+The existing temporal lock remains valuable for the large library of RRDBNet /
+ESRGAN image models, but it is a compatibility bridge. It is bypassed for true
+video models because stacking both mechanisms suppresses genuine motion.
 
 ---
 

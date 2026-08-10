@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — genuine multi-frame video super-resolution
+
+Kraken now has a distinct neural video-detail path instead of describing an
+image model plus smoothing as equivalent to video super-resolution.
+
+- Added NanoVSR-644k, a bidirectional recurrent model that consumes five
+  neighboring frames and returns five 4x frames in one inference window.
+- Added native NTCHW model discovery under `models/video/`; image detail,
+  video detail, and RIFE interpolation graphs can no longer be confused.
+- Long exports remain streaming through bounded five-frame windows and 320px
+  spatial overlap-save tiles.
+- Partial final windows repeat the last source frame and discard padded output,
+  preserving duration and frame count.
+- Hard cuts close the active window before the new shot so recurrent features
+  cannot ghost across edits.
+- Preview now renders a genuine temporal neighborhood for video models.
+- The motion-guided Stability lock remains available for image models and is
+  bypassed for learned video models to avoid double temporal smoothing.
+- Verified the actual graph on CUDA and exported a seven-frame
+  `SpaceVoyage_2.mp4` sample through two windows, including EOF padding.
+- Visually checked the retained sample: restored face, hair, tattoo, fabric and
+  hand detail were clean, with no visible spatial tile seams.
+- Rebuilt the root `Kraken Upscale.exe` (41,101,824 bytes; SHA-256
+  `37FDA4756E5E0C590CA4B031493FF312D196866B8592D20BF4646C8A26E2F030`).
+
 ## Unreleased — inverse telecine, and a corrected picture of the target content
 
 ### Inverse telecine

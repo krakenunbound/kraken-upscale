@@ -39,6 +39,7 @@ export component MainWindow inherits Window {
     in property <string> preview-status: "";
     in property <float> preview-progress: 0;
     in property <string> model-note: "";
+    in property <bool> model-is-video: false;
     /// Set when the chosen model's native scale exceeds the requested one.
     in property <string> scale-note: "";
     in-out property <float> strength: 1.0;
@@ -1506,8 +1507,11 @@ export component MainWindow inherits Window {
 
                                 // ── Stability (the temporal lock) ───────
                                 SectionHeader {
-                                    title: "Stability — temporal lock";
+                                    title: root.model-is-video
+                                        ? "Temporal consistency — built into model"
+                                        : "Stability — temporal lock";
                                     enabled <=> root.stability-on;
+                                    interactive: !root.model-is-video;
                                     expanded <=> root.stb-open;
                                     toggled(v) => { root.settings-changed(); }
                                 }
@@ -1528,9 +1532,9 @@ export component MainWindow inherits Window {
                                             padding: 9px;
                                             Help {
                                                 lines: 3;
-                                                text: "Holds invented detail still across frames so "
-                                                    + "texture stops boiling. This is the difference "
-                                                    + "between a video upscaler and an image one.";
+                                                text: root.model-is-video
+                                                    ? "This model consumes neighboring frames together and learns temporal detail directly. The separate frame-model lock is bypassed."
+                                                    : "Holds invented detail still across frames so texture stops boiling. This improves frame models but does not turn them into a learned video model.";
                                                 color: Pal.text-dim;
                                             }
                                         }
@@ -1538,14 +1542,14 @@ export component MainWindow inherits Window {
 
                                     SliderRow {
                                         text: "Lock";
-                                        enabled: root.stability-on;
+                                        enabled: root.stability-on && !root.model-is-video;
                                         value <=> root.lock;
                                         released => { root.settings-changed(); }
                                     }
 
                                     SliderRow {
                                         text: "Cut detect";
-                                        enabled: root.stability-on;
+                                        enabled: root.stability-on && !root.model-is-video;
                                         value <=> root.cut-detect;
                                         released => { root.settings-changed(); }
                                     }
