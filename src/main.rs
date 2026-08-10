@@ -96,6 +96,11 @@ enum TaskSpec {
     Generative(generative::ExportSpec),
 }
 
+enum ExportCommand {
+    Run(Vec<(usize, TaskSpec)>),
+    ReleaseGpuMemory,
+}
+
 impl TaskSpec {
     fn model(&self) -> &upscale::ModelEntry {
         match self {
@@ -786,6 +791,26 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let handle = ui.as_weak();
+        let tx = export_tx.clone();
+        let preview_generation = preview_generation.clone();
+        ui.on_release_gpu_memory(move || {
+            let Some(ui) = handle.upgrade() else { return };
+            if ui.get_export_running() {
+                ui.set_preview_status("GPU is busy with an active export".into());
+                return;
+            }
+            // Superseded preview output is discarded. Preview sessions are
+            // job-local and release themselves when their current pass exits.
+            preview_generation.fetch_add(1, Ordering::Relaxed);
+            ui.set_preview_status("releasing Kraken GPU caches…".into());
+            if tx.send(ExportCommand::ReleaseGpuMemory).is_err() {
+                ui.set_preview_status("GPU cache worker is unavailable".into());
+            }
+        });
+    }
+
+    {
+        let handle = ui.as_weak();
         let clip = clip.clone();
         let still = still.clone();
         let preview_generation = preview_generation.clone();
@@ -1064,7 +1089,7 @@ fn main() -> Result<(), slint::PlatformError> {
             match next.and_then(|idx| q.get(idx).cloned().map(|spec| (idx, spec))) {
                 Some((idx, spec)) => {
                     mark_scheduled(&ui, idx);
-                    let _ = tx.send(vec![(idx, spec)]);
+                    let _ = tx.send(ExportCommand::Run(vec![(idx, spec)]));
                 }
                 None => ui.set_preview_status("no unfinished task is available".into()),
             }
@@ -1101,7 +1126,7 @@ fn main() -> Result<(), slint::PlatformError> {
             for (idx, _) in &batch {
                 mark_scheduled(&ui, *idx);
             }
-            let _ = tx.send(batch);
+            let _ = tx.send(ExportCommand::Run(batch));
         });
     }
 
@@ -1790,14 +1815,35 @@ fn spawn_image_preview_worker(
 fn spawn_exporter(
     handle: slint::Weak<MainWindow>,
     active_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
-) -> Sender<Vec<(usize, TaskSpec)>> {
-    let (tx, rx) = channel::<Vec<(usize, TaskSpec)>>();
+) -> Sender<ExportCommand> {
+    let (tx, rx) = channel::<ExportCommand>();
 
     std::thread::spawn(move || {
         let mut loaded: Option<(String, bool, upscale::Engine)> = None;
         let mut rife_model: Option<interpolate::Rife> = None;
 
-        while let Ok(batch) = rx.recv() {
+        while let Ok(command) = rx.recv() {
+            let batch = match command {
+                ExportCommand::Run(batch) => batch,
+                ExportCommand::ReleaseGpuMemory => {
+                    loaded = None;
+                    rife_model = None;
+                    log(
+                        &handle,
+                        "GPU memory released: idle upscale and interpolation caches cleared",
+                    );
+                    let h = handle.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = h.upgrade() {
+                            ui.set_preview_status(
+                                "Kraken GPU caches released · telemetry will refresh shortly"
+                                    .into(),
+                            );
+                        }
+                    });
+                    continue;
+                }
+            };
             let cancel = Arc::new(AtomicBool::new(false));
             if let Ok(mut slot) = active_cancel.lock() {
                 *slot = Some(cancel.clone());

@@ -136,6 +136,7 @@ export component MainWindow inherits Window {
     callback mode-changed(int);
     callback clear-video();
     callback clear-queue();
+    callback release-gpu-memory();
     callback seek(float);
     callback settings-changed();
     /// Re-runs the preview once an export releases the GPU.
@@ -355,7 +356,7 @@ export component MainWindow inherits Window {
 
                         // ── System ──────────────────────────────────────
                         if root.dock-panel == 2: ScrollView {
-                            viewport-height: 560px;
+                            viewport-height: 650px;
 
                             VerticalLayout {
                                 alignment: start;
@@ -395,6 +396,21 @@ export component MainWindow inherits Window {
                                         value: "\{Math.round(root.sys-vram-free * 10) / 10} GB";
                                     }
                                     StatRow { label: "driver"; value: root.sys-driver; }
+                                }
+
+                                Btn {
+                                    text: root.export-running
+                                        ? "GPU In Use"
+                                        : "Release GPU Memory";
+                                    height: 30px;
+                                    enabled: !root.export-running;
+                                    clicked => { root.release-gpu-memory(); }
+                                }
+
+                                Help {
+                                    lines: 3;
+                                    text: "Drops Kraken's idle model and interpolation caches. "
+                                        + "An active preview finishes first; memory used by other apps is unaffected.";
                                 }
 
                                 StatBox {

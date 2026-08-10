@@ -18,6 +18,24 @@ Last updated: 2026-08-10
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B48 — No manual way to release Kraken's idle GPU allocations
+
+- **Where:** System panel and long-lived export worker
+- **What:** the export worker deliberately retained the last upscale/RIFE
+  sessions between queued jobs for speed, but there was no user control to
+  drop those caches when another GPU-heavy application needed the card.
+- **Impact:** the System panel could show nearly all VRAM occupied after work
+  had stopped, with no recovery path short of closing Kraken.
+- **Fix:** added **Release GPU Memory** beneath the live GPU telemetry. It
+  invalidates superseded preview delivery and tells the owning export worker to
+  drop its idle upscale and interpolation sessions on their correct thread.
+  The button is disabled during an active export and explicitly notes that it
+  cannot reclaim memory owned by another application or Kraken instance.
+- **Verification:** command wiring compiles through the Slint callback, cache
+  ownership remains on the worker thread, and the release path logs completion
+  only after both cached sessions have been dropped.
+- [x] B48 — manual idle GPU/cache release control
+
 ### B47 — Images mode lacked the checkpoint-driven refine path from Kraken Art
 
 - **Where:** Images mode, export task capture, CUDA runtime packaging
@@ -38,10 +56,11 @@ Last updated: 2026-08-10
   is required.
 - **Verification:** native runtime device discovery identified the RTX 3090;
   manifest/package discovery, odd-canvas tile coverage, PNG transport,
-  deterministic spatial seeds, the complete 50-test suite, and strict lint all
-  pass. A live FLUX tile could not be run during this build because the
-  user-open previous release retained 23.8 GB of the 24 GB VRAM; that process
-  was deliberately left untouched.
+  deterministic spatial seeds, the complete test suite, and strict lint all
+  pass. After the prior app instance was closed, the release integration test
+  loaded the complete FLUX.1 Dev package and generated a real 512×512 img2img
+  tile on CUDA. The native server exited cleanly and GPU use returned to about
+  0.9 GB used / 23.4 GB free.
 - [x] B47 — native Ultimate-style generative still-image pipeline is wired and packaged
 
 ### B46 — Replacing an image could temporarily compare two different sources

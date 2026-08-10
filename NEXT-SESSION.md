@@ -42,6 +42,12 @@ Both modern ZIP checkpoints and the legacy stream format used by many community
 models are supported. Old ESRGAN and newer RealESRGAN RRDBNet key layouts are
 recognized, including 2× input rearrangement and 2×/4×/8× native scales.
 
+The System panel now includes **Release GPU Memory**. It drops the export
+worker's idle upscale/RIFE sessions without closing Kraken. Preview sessions
+are already job-local; an active preview finishes and releases itself. The
+button is disabled during export and cannot affect VRAM owned by another
+process.
+
 ## Build and run
 
 ```text

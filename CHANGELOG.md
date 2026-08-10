@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — manual GPU memory release
+
+- Added **Release GPU Memory** directly below the System panel's live GPU
+  telemetry.
+- The control drops Kraken's retained upscale and RIFE sessions on the export
+  worker that owns them, invalidates superseded preview delivery, and reports
+  completion in the activity log.
+- The button is disabled during active export instead of terminating a task,
+  and its help text makes clear that allocations belonging to other programs or
+  another Kraken instance cannot be reclaimed from this window.
+
 ## Unreleased — native Generative Refine for still images
 
 - Ported Kraken Art's useful Ultimate-style orchestration into Images mode as
@@ -26,10 +37,12 @@
   mode, and output remains lossless PNG.
 - Added cancellation that terminates the exact native server process tree and
   preserves its diagnostic log tail on failure.
-- Built `Kraken Upscale.new.exe` in the project root (42,543,616 bytes;
-  SHA-256 `A85650DB51F308DD76663459DF32710EDCABE6DD8A72F34D71D77FF286BC16A2`).
-  The `.new` name preserves the older executable that was still open during
-  packaging.
+- Hardware-verified the complete FLUX.1 Dev package on the RTX 3090 with a real
+  512×512 img2img tile. The server cleaned up after the test and VRAM returned
+  to about 0.9 GB used / 23.4 GB free.
+- Built both root launch copies from the final release: `Kraken Upscale.exe`
+  and `Kraken Upscale.new.exe` (42,594,816 bytes; SHA-256
+  `4545F19F013BA6869374D96D0C6F97DF4666EAF1BE2CAF63FCB2D008C35D9FED`).
 
 ## Unreleased — atomic image replacement
 
