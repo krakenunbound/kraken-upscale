@@ -8,6 +8,7 @@
 /.model-staging/
 /.native-staging/
 /native-diffusion/
+/rtx-vsr/
 /models/generative/**/*.safetensors
 /models/generative/**/*.sft
 /models/generative/**/*.gguf
@@ -36,6 +37,8 @@
 /ffmpeg/
 /onnxruntime_providers_cuda.dll
 /onnxruntime_providers_shared.dll
+/onnxruntime_providers_nv_tensorrt_rtx.dll
+/onnxruntime_providers_tensorrt.dll
 
 # Local run/build logs.
 /stage-err.txt

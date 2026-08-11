@@ -19,6 +19,8 @@ pub struct Settings {
     pub image_model: String,
     /// 0 = faithful model-only upscale, 1 = faithful + generative tile refine.
     pub image_pipeline_index: i32,
+    /// 0 = Low, 1 = Medium, 2 = High, 3 = Ultra.
+    pub rtx_vsr_quality_index: i32,
     pub generative_model: String,
     pub generative_prompt: String,
     pub generative_denoise: f32,
@@ -61,6 +63,7 @@ impl Default for Settings {
             video_model: String::new(),
             image_model: String::new(),
             image_pipeline_index: 0,
+            rtx_vsr_quality_index: 3,
             generative_model: String::new(),
             generative_prompt: "high detail, faithful textures, preserve composition".into(),
             generative_denoise: 0.10,
@@ -155,6 +158,7 @@ mod tests {
             video_model: "NanoVSR-644k (video)".into(),
             image_model: "4x_foolhardy_Remacri".into(),
             image_pipeline_index: 1,
+            rtx_vsr_quality_index: 2,
             generative_model: "FLUX.1 Dev".into(),
             generative_denoise: 0.18,
             ..Settings::default()
@@ -165,6 +169,7 @@ mod tests {
         assert_eq!(restored.video_model, settings.video_model);
         assert_eq!(restored.image_model, settings.image_model);
         assert_eq!(restored.image_pipeline_index, 1);
+        assert_eq!(restored.rtx_vsr_quality_index, 2);
         assert_eq!(restored.generative_model, "FLUX.1 Dev");
         assert_eq!(restored.generative_denoise, 0.18);
     }

@@ -256,6 +256,7 @@ export component Btn inherits Rectangle {
 export component SegBtn inherits Rectangle {
     in property <string> text;
     in property <bool> active: false;
+    in property <bool> enabled: true;
     callback clicked();
 
     height: 24px;
@@ -274,7 +275,10 @@ export component SegBtn inherits Rectangle {
         vertical-alignment: center;
     }
 
+    opacity: root.enabled ? 1.0 : 0.35;
+
     ta := TouchArea {
+        enabled: root.enabled;
         clicked => { root.clicked(); }
     }
 }

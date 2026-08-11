@@ -30,6 +30,14 @@ native tiled CUDA path, and writes lossless PNG tasks. Alpha is preserved
 separately from RGB inference. Video and image tasks may coexist in the queue,
 and each mode remembers its own selected model.
 
+Images mode also offers **RTX VSR**, a fast faithful NVIDIA backend separate
+from both the ONNX model path and Generative Refine. It calls the Video Effects
+SDK directly using the optional `rtx-vsr/` payload beside the executable.
+Low/Medium/High/Ultra quality and x2/x3/x4 are available; Ultra matches the
+tested ComfyUI RTX-VSR-PRO workflow. No ComfyUI or external scripting runtime
+is involved. The runtime is proprietary and intentionally not checked into
+Git; see [RTX-VSR.md](RTX-VSR.md).
+
 Images mode now also has a **Generative Refine** submode. It runs the selected
 faithful image model first, drops that CUDA session, then uses a bundled native
 `stable-diffusion.cpp` CUDA server for low-denoise FLUX img2img tiles. Complete
@@ -84,6 +92,7 @@ models/video/                    genuine neighboring-frame models
 models/interpolation/            RIFE timestep model
 models/generative/               manifests + complete generative model packages
 native-diffusion/                bundled stable-diffusion.cpp CUDA runtime
+rtx-vsr/                         optional NVIDIA Video Effects SDK runtime
 onnxruntime_providers_cuda.dll
 onnxruntime_providers_shared.dll
 ```
@@ -104,13 +113,14 @@ These generated payloads are intentionally ignored by Git.
 
 ## Bug audit
 
-All findings through B46 are closed — see [bugslist.md](bugslist.md) and
+All findings through B50 are closed — see [bugslist.md](bugslist.md) and
 [CHANGELOG.md](CHANGELOG.md). B34 was closed as not a defect after measurement
 contradicted it. B43 added genuine multi-frame inference; B44 installed and
 clearly classified the recommended fast video-compatible model families. B45
 added the separate still-image workflow for the existing image models.
 B46 made replacement atomic so a superseded preview cannot be shown beside a
-newly dropped image.
+newly dropped image. B47–B49 cover Generative Refine and memory/progress
+reliability. B50 added the native RTX VSR Images pipeline.
 
 ## Completed reliability pass
 

@@ -18,6 +18,7 @@ mod image_mode;
 mod interpolate;
 mod media;
 mod pth;
+mod rtx_vsr;
 mod settings;
 mod stages;
 mod temporal;
@@ -87,6 +88,7 @@ struct ImageJob {
     match_color: bool,
     fp16: bool,
     tile: u32,
+    rtx_quality: Option<rtx_vsr::Quality>,
 }
 
 #[derive(Clone)]
@@ -94,6 +96,7 @@ enum TaskSpec {
     Video(export::ExportSpec),
     Image(image_mode::ExportSpec),
     Generative(generative::ExportSpec),
+    RtxImage(rtx_vsr::ExportSpec),
 }
 
 enum ExportCommand {
@@ -102,19 +105,21 @@ enum ExportCommand {
 }
 
 impl TaskSpec {
-    fn model(&self) -> &upscale::ModelEntry {
+    fn model(&self) -> Option<&upscale::ModelEntry> {
         match self {
-            Self::Video(spec) => &spec.model,
-            Self::Image(spec) => &spec.model,
-            Self::Generative(spec) => &spec.conventional.model,
+            Self::Video(spec) => Some(&spec.model),
+            Self::Image(spec) => Some(&spec.model),
+            Self::Generative(spec) => Some(&spec.conventional.model),
+            Self::RtxImage(_) => None,
         }
     }
 
-    fn fp16(&self) -> bool {
+    fn fp16(&self) -> Option<bool> {
         match self {
-            Self::Video(spec) => spec.fp16,
-            Self::Image(spec) => spec.fp16,
-            Self::Generative(spec) => spec.conventional.fp16,
+            Self::Video(spec) => Some(spec.fp16),
+            Self::Image(spec) => Some(spec.fp16),
+            Self::Generative(spec) => Some(spec.conventional.fp16),
+            Self::RtxImage(_) => None,
         }
     }
 
@@ -123,6 +128,7 @@ impl TaskSpec {
             Self::Video(spec) => &spec.out_path,
             Self::Image(spec) => &spec.out_path,
             Self::Generative(spec) => spec.out_path(),
+            Self::RtxImage(spec) => &spec.out_path,
         }
     }
 }
@@ -279,7 +285,16 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_generative_runtime_ready(
         generative::runtime_available() && !generative_models.is_empty(),
     );
-    ui.set_image_pipeline_index(saved.image_pipeline_index.clamp(0, 1));
+    let rtx_vsr_ready = rtx_vsr::available();
+    ui.set_rtx_vsr_ready(rtx_vsr_ready);
+    ui.set_image_pipeline_index(
+        if saved.image_pipeline_index == 2 && !rtx_vsr_ready {
+            0
+        } else {
+            saved.image_pipeline_index.clamp(0, 2)
+        },
+    );
+    ui.set_rtx_vsr_quality_index(saved.rtx_vsr_quality_index.clamp(0, 3));
     ui.set_generative_prompt(saved.generative_prompt.clone().into());
     ui.set_generative_denoise(saved.generative_denoise.clamp(0.05, 0.40));
     ui.set_generative_steps_index(
@@ -301,6 +316,14 @@ fn main() -> Result<(), slint::PlatformError> {
             },
             generative_models.len()
         ),
+    );
+    log(
+        &logger,
+        if let Some(path) = rtx_vsr::runtime_dir() {
+            format!("NVIDIA RTX VSR: ready · {}", path.display())
+        } else {
+            "NVIDIA RTX VSR: optional runtime missing".into()
+        },
     );
     let initial_mode = saved.mode_index.clamp(0, 1);
     ui.set_mode_index(initial_mode);
@@ -400,9 +423,13 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_model_video_tuned(model.video_tuned);
             let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
             ui.set_scale_note(
-                upscale::scale_advice(&model, target_scale, &active_models.borrow())
-                    .unwrap_or_default()
-                    .into(),
+                if ui.get_mode_index() == 1 && ui.get_image_pipeline_index() == 2 {
+                    "".into()
+                } else {
+                    upscale::scale_advice(&model, target_scale, &active_models.borrow())
+                        .unwrap_or_default()
+                        .into()
+                },
             );
 
             if ui.get_mode_index() == 1 {
@@ -414,11 +441,25 @@ fn main() -> Result<(), slint::PlatformError> {
                         "{} × {} · {}",
                         info.width * target_scale,
                         info.height * target_scale,
-                        model.name
+                        if ui.get_image_pipeline_index() == 2 {
+                            format!(
+                                "RTX VSR {}",
+                                rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index()).label()
+                            )
+                        } else {
+                            model.name.clone()
+                        }
                     )
                     .into(),
                 );
-                ui.set_preview_status("upscaling image preview…".into());
+                ui.set_preview_status(
+                    if ui.get_image_pipeline_index() == 2 {
+                        "running NVIDIA RTX VSR preview…"
+                    } else {
+                        "upscaling image preview…"
+                    }
+                    .into(),
+                );
                 let generation = preview_generation.fetch_add(1, Ordering::Relaxed) + 1;
                 if ui.get_export_running() {
                     ui.set_preview_status(
@@ -440,6 +481,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     } else {
                         SAFE_TILE
                     },
+                    rtx_quality: (ui.get_image_pipeline_index() == 2).then(|| {
+                        rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index())
+                    }),
                 });
                 return;
             }
@@ -898,6 +942,47 @@ fn main() -> Result<(), slint::PlatformError> {
                     .file_stem()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "image".into());
+                if ui.get_image_pipeline_index() == 2 {
+                    if !rtx_vsr::available() {
+                        ui.set_preview_status(
+                            "NVIDIA RTX VSR runtime missing — restore the rtx-vsr folder beside Kraken"
+                                .into(),
+                        );
+                        return;
+                    }
+                    let quality =
+                        rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index());
+                    let candidate = info.path.with_file_name(format!(
+                        "{stem}_{target_scale}x_RTX-VSR-{}.png",
+                        quality.label()
+                    ));
+                    let out_path = unique_output_path(&candidate, &queue.borrow());
+                    let spec = rtx_vsr::ExportSpec {
+                        image: info.clone(),
+                        target_scale,
+                        quality,
+                        out_path: out_path.clone(),
+                    };
+                    let (width, height) = spec.output_size();
+                    queue.borrow_mut().push(TaskSpec::RtxImage(spec));
+                    if let Some(rows) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
+                        rows.push(TaskRow {
+                            name: info.file_name().into(),
+                            detail: format!(
+                                "{width}×{height} · NVIDIA RTX VSR {} · {target_scale}x · lossless PNG",
+                                quality.label()
+                            )
+                            .into(),
+                            status: "queued".into(),
+                            path: out_path.display().to_string().into(),
+                            progress: 0.0,
+                            running: false,
+                            failed: false,
+                            done: false,
+                        });
+                    }
+                    return;
+                }
                 let generative_package = if ui.get_image_pipeline_index() == 1 {
                     let package = generative_models
                         .get(ui.get_generative_model_index().max(0) as usize)
@@ -1695,6 +1780,54 @@ fn spawn_image_preview_worker(
                 });
             }
 
+            if let Some(quality) = job.rtx_quality {
+                log(
+                    &handle,
+                    format!(
+                        "image preview: NVIDIA RTX VSR {} · {}x",
+                        quality.label(),
+                        job.target_scale
+                    ),
+                );
+                let h = handle.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = h.upgrade() {
+                        ui.set_preview_progress(0.15);
+                    }
+                });
+                let result = rtx_vsr::upscale_frame(&source, job.target_scale, quality);
+                match result {
+                    Ok(output) => {
+                        let elapsed = started.elapsed().as_secs_f32();
+                        let note = format!(
+                            "NVIDIA RTX VSR {} · {}x · {:.1}s on CUDA",
+                            quality.label(),
+                            job.target_scale,
+                            elapsed
+                        );
+                        log(&handle, format!("image preview completed: {note}"));
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            note,
+                            Some(output),
+                        );
+                    }
+                    Err(error) => {
+                        log(&handle, format!("RTX VSR preview failed: {error}"));
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            format!("RTX VSR failed: {error}"),
+                            None,
+                        );
+                    }
+                }
+                continue;
+            }
+
             log(
                 &handle,
                 format!("image preview: loading {}", job.model.name),
@@ -1863,44 +1996,49 @@ fn spawn_exporter(
                 }
                 set_task(&handle, idx, 0.0, "loading model", true, false);
 
-                let model = spec.model().clone();
-                let fp16 = spec.fp16();
-
-                let stale = loaded
-                    .as_ref()
-                    .map(|(name, half, _)| name != &model.name || *half != fp16)
-                    .unwrap_or(true);
-                if stale {
-                    match upscale::Engine::load(&model, fp16) {
-                        Ok(u) => {
-                            log(
-                                &handle,
-                                format!(
-                                    "export: loaded {} ({}x native) on {}",
-                                    model.name,
-                                    u.scale(),
-                                    u.provider()
-                                ),
-                            );
-                            loaded = Some((model.name.clone(), fp16, u));
-                        }
-                        Err(e) => {
-                            log(&handle, format!("export: model load failed: {e}"));
-                            set_task(&handle, idx, 0.0, "model failed", false, true);
-                            continue;
+                if let (Some(model), Some(fp16)) = (spec.model().cloned(), spec.fp16()) {
+                    let stale = loaded
+                        .as_ref()
+                        .map(|(name, half, _)| name != &model.name || *half != fp16)
+                        .unwrap_or(true);
+                    if stale {
+                        match upscale::Engine::load(&model, fp16) {
+                            Ok(u) => {
+                                log(
+                                    &handle,
+                                    format!(
+                                        "export: loaded {} ({}x native) on {}",
+                                        model.name,
+                                        u.scale(),
+                                        u.provider()
+                                    ),
+                                );
+                                loaded = Some((model.name.clone(), fp16, u));
+                            }
+                            Err(e) => {
+                                log(&handle, format!("export: model load failed: {e}"));
+                                set_task(&handle, idx, 0.0, "model failed", false, true);
+                                continue;
+                            }
                         }
                     }
-                }
-                let Some((_, _, up)) = loaded.as_mut() else {
-                    continue;
-                };
-                if up.provider() != "CUDA" {
-                    log(
-                        &handle,
-                        "export stopped: GPU runtime unavailable; slow CPU processing is disabled",
-                    );
-                    set_task(&handle, idx, 0.0, "GPU runtime missing", false, true);
-                    continue;
+                    let provider = loaded
+                        .as_ref()
+                        .map(|(_, _, engine)| engine.provider())
+                        .unwrap_or("missing");
+                    if provider != "CUDA" {
+                        log(
+                            &handle,
+                            "export stopped: GPU runtime unavailable; slow CPU processing is disabled",
+                        );
+                        set_task(&handle, idx, 0.0, "GPU runtime missing", false, true);
+                        continue;
+                    }
+                } else {
+                    // RTX VSR owns its native GPU context. Release any idle
+                    // ONNX/RIFE sessions first so it gets the card cleanly.
+                    loaded = None;
+                    rife_model = None;
                 }
 
                 let needs_rife = matches!(
@@ -1969,6 +2107,18 @@ fn spawn_exporter(
                             image.refine_tile
                         ),
                     ),
+                    TaskSpec::RtxImage(image) => log(
+                        &handle,
+                        format!(
+                            "RTX VSR image export started: {} · {}×{} → {}×{} · {} · native CUDA",
+                            image.image.file_name(),
+                            image.image.width,
+                            image.image.height,
+                            image.output_size().0,
+                            image.output_size().1,
+                            image.quality.label()
+                        ),
+                    ),
                 }
 
                 let started = std::time::Instant::now();
@@ -2017,20 +2167,26 @@ fn spawn_exporter(
                 };
 
                 let result = match &spec {
-                    TaskSpec::Video(video) => export::run(
-                        video,
-                        up,
-                        rife_model.as_mut(),
-                        video.tile,
-                        OVERLAP,
-                        cancel.clone(),
-                        &mut on_progress,
-                    )
-                    .map(Some),
-                    TaskSpec::Image(image) => {
-                        image_mode::run(image, up, OVERLAP, cancel.as_ref(), &mut on_progress)
-                            .map(|_| None)
-                    }
+                    TaskSpec::Video(video) => match loaded.as_mut() {
+                        Some((_, _, up)) => export::run(
+                            video,
+                            up,
+                            rife_model.as_mut(),
+                            video.tile,
+                            OVERLAP,
+                            cancel.clone(),
+                            &mut on_progress,
+                        )
+                        .map(Some),
+                        None => Err("upscale model was not loaded".into()),
+                    },
+                    TaskSpec::Image(image) => match loaded.as_mut() {
+                        Some((_, _, up)) => {
+                            image_mode::run(image, up, OVERLAP, cancel.as_ref(), &mut on_progress)
+                                .map(|_| None)
+                        }
+                        None => Err("upscale model was not loaded".into()),
+                    },
                     TaskSpec::Generative(image) => {
                         let progress_handle = handle.clone();
                         let mut pre_progress = move |done: u64, total: u64| {
@@ -2048,13 +2204,16 @@ fn spawn_exporter(
                                 false,
                             );
                         };
-                        let pre_upscaled = generative::pre_upscale(
-                            image,
-                            up,
-                            OVERLAP,
-                            cancel.as_ref(),
-                            &mut pre_progress,
-                        );
+                        let pre_upscaled = match loaded.as_mut() {
+                            Some((_, _, up)) => generative::pre_upscale(
+                                image,
+                                up,
+                                OVERLAP,
+                                cancel.as_ref(),
+                                &mut pre_progress,
+                            ),
+                            None => Err("upscale model was not loaded".into()),
+                        };
                         // The native diffusion model needs nearly the entire
                         // card. Release the faithful ONNX session before its
                         // server starts instead of relying on CUDA OOM recovery.
@@ -2077,6 +2236,9 @@ fn spawn_exporter(
                             }
                             Err(error) => Err(error),
                         }
+                    }
+                    TaskSpec::RtxImage(image) => {
+                        rtx_vsr::run(image, cancel.as_ref(), &mut on_progress).map(|_| None)
                     }
                 };
 
@@ -2404,6 +2566,7 @@ fn collect_settings(
         video_model,
         image_model,
         image_pipeline_index: ui.get_image_pipeline_index(),
+        rtx_vsr_quality_index: ui.get_rtx_vsr_quality_index(),
         generative_model: generative_models
             .get(ui.get_generative_model_index().max(0) as usize)
             .map(|model| model.name.clone())

@@ -72,7 +72,9 @@ export component MainWindow inherits Window {
     in property <[string]> model-names: ["(no models converted)"];
     in property <[string]> generative-model-names: ["(no complete generative packages)"];
     in property <bool> generative-runtime-ready: false;
+    in property <bool> rtx-vsr-ready: false;
     in-out property <int> image-pipeline-index: 0;
+    in-out property <int> rtx-vsr-quality-index: 3;
     in-out property <int> generative-model-index: 0;
     in-out property <string> generative-prompt: "high detail, faithful textures, preserve composition";
     in-out property <float> generative-denoise: 0.10;
@@ -1053,7 +1055,9 @@ export component MainWindow inherits Window {
                                 text: root.has-clip
                                     ? root.image-pipeline-index == 1
                                         ? "Still image ready · faithful upscale + native generative refine"
-                                        : "Still image ready · lossless PNG output"
+                                        : root.image-pipeline-index == 2
+                                            ? "Still image ready · native NVIDIA RTX VSR"
+                                            : "Still image ready · lossless PNG output"
                                     : "Import an image to begin";
                                 color: root.has-clip ? Pal.text-dim : Pal.text-mute;
                                 font-size: 11.5px;
@@ -1062,11 +1066,15 @@ export component MainWindow inherits Window {
                             }
 
                             Btn {
-                                text: root.image-pipeline-index == 1 ? "Add Refine Task" : "Add Image Task";
+                                text: root.image-pipeline-index == 1 ? "Add Refine Task"
+                                    : root.image-pipeline-index == 2 ? "Add RTX Task"
+                                    : "Add Image Task";
                                 width: 138px;
                                 primary: true;
                                 enabled: root.has-clip
-                                    && (root.image-pipeline-index == 0 || root.generative-runtime-ready);
+                                    && (root.image-pipeline-index == 0
+                                        || (root.image-pipeline-index == 1 && root.generative-runtime-ready)
+                                        || (root.image-pipeline-index == 2 && root.rtx-vsr-ready));
                                 clicked => { root.add-task(); }
                             }
                         }
@@ -1303,6 +1311,7 @@ export component MainWindow inherits Window {
                         + (root.mode-index == 0 && root.src-open ? 210px : 0px)
                         + (root.det-open ? 470px : 0px)
                         + (root.mode-index == 1 && root.det-open && root.image-pipeline-index == 1 ? 340px : 0px)
+                        + (root.mode-index == 1 && root.det-open && root.image-pipeline-index == 2 ? 150px : 0px)
                         + (root.mode-index == 0 && root.stb-open ? 200px : 0px)
                         + (root.mode-index == 0 && root.fi-open  ?  90px : 0px)
                         + (root.col-open ?  60px : 0px);
@@ -1519,7 +1528,7 @@ export component MainWindow inherits Window {
                                             }
                                         }
                                         SegBtn {
-                                            text: "Generative Refine";
+                                            text: "Generative";
                                             active: root.image-pipeline-index == 1;
                                             horizontal-stretch: 1;
                                             clicked => {
@@ -1527,9 +1536,20 @@ export component MainWindow inherits Window {
                                                 root.settings-changed();
                                             }
                                         }
+                                        SegBtn {
+                                            text: "RTX VSR";
+                                            enabled: root.rtx-vsr-ready;
+                                            active: root.image-pipeline-index == 2;
+                                            horizontal-stretch: 1;
+                                            clicked => {
+                                                root.image-pipeline-index = 2;
+                                                root.settings-changed();
+                                            }
+                                        }
                                     }
 
                                     FieldRow {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         text: "Model";
                                         accent: true;
                                         items: root.model-names;
@@ -1538,6 +1558,7 @@ export component MainWindow inherits Window {
                                     }
 
                                     HorizontalLayout {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         spacing: 7px;
                                         Text {
                                             text: "?";
@@ -1582,6 +1603,7 @@ export component MainWindow inherits Window {
                                     }
 
                                     SliderRow {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         text: "Strength";
                                         value <=> root.strength;
                                         // Re-render on release, not on every
@@ -1590,18 +1612,21 @@ export component MainWindow inherits Window {
                                     }
 
                                     Help {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         lines: 2;
                                         text: "Flat blend toward the source. Softens everything "
                                             + "equally, including detail you wanted.";
                                     }
 
                                     SliderRow {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         text: "Detail limit";
                                         value <=> root.detail-limit;
                                         released => { root.settings-changed(); }
                                     }
 
                                     Help {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         lines: 3;
                                         text: "Caps how far a pixel may move from the source. "
                                             + "Removes invented structure (freckles drawn as "
@@ -1609,6 +1634,7 @@ export component MainWindow inherits Window {
                                     }
 
                                     CheckRow {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         text: "Half precision (FP16)";
                                         hint: "Uses a compatible FP16 model when available. Speedup is model- and tile-dependent.";
                                         checked <=> root.fp16;
@@ -1616,10 +1642,36 @@ export component MainWindow inherits Window {
                                     }
 
                                     CheckRow {
+                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
                                         text: "Auto tile size";
                                         hint: "Uses a larger tile on high-VRAM GPUs. Disable for the conservative 256px tile.";
                                         checked <=> root.auto-tile;
                                         toggled(v) => { root.settings-changed(); }
+                                    }
+
+                                    if root.mode-index == 1 && root.image-pipeline-index == 2: VerticalLayout {
+                                        spacing: 9px;
+
+                                        Rectangle { height: 1px; background: Pal.line-soft; }
+
+                                        Help {
+                                            lines: 3;
+                                            text: "NVIDIA RTX Video Super Resolution runs directly on the GPU. It is a fast, faithful enhancement pass with no prompts, diffusion, or invented composition.";
+                                        }
+
+                                        FieldRow {
+                                            text: "Quality";
+                                            accent: true;
+                                            enabled: root.rtx-vsr-ready;
+                                            items: ["Low", "Medium", "High", "Ultra"];
+                                            current <=> root.rtx-vsr-quality-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        Help {
+                                            lines: 2;
+                                            text: "Ultra matches the RTX-VSR-PRO workflow. Lower modes trade some enhancement for speed.";
+                                        }
                                     }
 
                                     if root.mode-index == 1 && root.image-pipeline-index == 1: VerticalLayout {
@@ -1873,7 +1925,9 @@ export component MainWindow inherits Window {
                                             ? root.export-summary
                                             : root.image-pipeline-index == 1
                                                 ? "png · native FLUX tile refine · lossless"
-                                                : "png · lossless · full resolution";
+                                                : root.image-pipeline-index == 2
+                                                    ? "png · native NVIDIA RTX VSR · lossless"
+                                                    : "png · lossless · full resolution";
                                         color: Pal.text-mute;
                                     }
                                 }
@@ -1882,7 +1936,9 @@ export component MainWindow inherits Window {
                                     alignment: center;
                                     Text {
                                         text: root.mode-index == 0 ? "LOCKED"
-                                            : root.image-pipeline-index == 1 ? "GENERATIVE" : "LOSSLESS";
+                                            : root.image-pipeline-index == 1 ? "GENERATIVE"
+                                            : root.image-pipeline-index == 2 ? "RTX VSR"
+                                            : "LOSSLESS";
                                         color: Pal.text-mute;
                                         font-size: 9px;
                                         font-weight: 700;

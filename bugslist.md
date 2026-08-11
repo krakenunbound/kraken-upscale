@@ -10,13 +10,40 @@ copy claims it is already active.
 **Method:** full pass over `src/*.rs` and the export/preview control surface in
 `ui/app.slint`. No fixes applied in this pass — findings only.
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 ---
 
 > **Status 2026-08-07:** every finding below is closed. B33 and B35–B42 were
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
+
+### B50 — The good RTX VSR image path existed only in ComfyUI
+
+- **Where:** Images mode, preview/export backends, optional runtime packaging
+- **What:** the tested `RTX-VSR-PRO.json` workflow produced a strong fast 2×
+  result through NVIDIA Video Super Resolution at ULTRA quality, but Kraken
+  offered only conventional ONNX models or the much slower FLUX refine path.
+- **Impact:** the most practical faithful result required leaving Kraken and
+  running a separate application. Users could also mistake Generative Refine
+  for the equivalent option even though it has completely different speed and
+  detail-invention behavior.
+- **Fix:** added **RTX VSR** as a third Images pipeline with x2/x3/x4 and
+  Low/Medium/High/Ultra choices. Kraken calls NVIDIA's Video Effects SDK DLLs
+  directly from a colocated `rtx-vsr/` folder; it does not launch ComfyUI or
+  require an external scripting runtime. Preview and queue exports use the
+  same backend, write lossless PNG, drop idle ONNX/RIFE sessions before export,
+  and report native CUDA failures instead of falling back. Outputs above the
+  verified 15,360px VSR edge use the Pro workflow's protected intermediate and
+  an exact final resize; larger than 16,384px is rejected. A channel-collapse
+  guard prevents the known 16K corrupted result from being saved.
+- **Verification:** the native hardware smoke loaded the official 0.1.0.1
+  runtime on the RTX 3090, processed 640×360 RGB through ULTRA, returned a
+  non-empty 1280×720 frame, and released the effect and GPU buffers. The final
+  release UI also processed the supplied 720×1280 source to 1440×2560 through
+  Ultra in 1.0 seconds on CUDA. All 40 normal tests pass; the hardware test
+  also passes when explicitly enabled.
+- [x] B50 — native NVIDIA RTX VSR is a real selectable Images pipeline
 
 ### B49 — Generative export looked frozen and used an unsuitable FP32 model
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — native NVIDIA RTX VSR image mode
+
+- Added **RTX VSR** beside Faithful and Generative in Images mode. The same
+  x2/x3/x4 scale control works with Low, Medium, High, or Ultra quality; Ultra
+  matches the supplied `RTX-VSR-PRO.json` workflow.
+- Integrated NVIDIA Video Super Resolution through its native Windows C API.
+  Kraken loads the optional proprietary SDK payload from `rtx-vsr/` and sends
+  RGBA8 GPU buffers directly—no ComfyUI process and no external scripting
+  runtime.
+- Added capability detection, explicit missing-runtime UI gating, native error
+  text, preview progress, queue progress, activity-log details, lossless PNG
+  export, and persisted quality selection.
+- RTX export releases Kraken's idle ONNX and RIFE sessions before creating the
+  NVIDIA effect, and destroys the effect plus GPU buffers after each operation.
+- Ported the RTX-VSR-PRO safety behavior: direct VSR is capped at the verified
+  15,360px edge, exact outputs up to 16,384px use an antialiased final resize,
+  and catastrophic single-channel collapse aborts the save.
+- Hardware-verified ULTRA on the RTX 3090 with a native 640×360 → 1280×720
+  test. The final release UI also completed the supplied 720×1280 source at
+  1440×2560 in 1.0 seconds on CUDA. The 40-test default suite passes, as does
+  the opt-in hardware test.
+- Built both easy-launch copies from the final release: `Kraken Upscale.exe`
+  and `Kraken Upscale.new.exe` (42,886,656 bytes; SHA-256
+  `8B309663B5E0EABDEF57E0E4CC02F3542CFD332E9EF9A2DEBBBB38916F1843FC`).
+
 ## Unreleased — visible and practical Generative Refine progress
 
 - Replaced the oversized 23.8 GB FP32 FLUX transformer with city96's pinned,

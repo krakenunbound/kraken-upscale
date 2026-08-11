@@ -2967,6 +2967,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "candle-core",
+ "libloading",
  "ort",
  "png 0.17.16",
  "rayon",

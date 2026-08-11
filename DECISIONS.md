@@ -644,3 +644,30 @@ higher output frame rate.
 | `ui/theme.slint` | Palette — restyling starts here |
 | `vendor/ffmpeg/` | LGPL ffmpeg binaries |
 | `models/` | `.pth` and `.onnx` models, auto-discovered |
+
+---
+
+## 14. Native RTX VSR is a separate faithful image backend
+
+The supplied ComfyUI workflow is not an Ultimate SD Upscaler or a checkpoint
+pipeline. It is one operation: NVIDIA `VideoSuperRes`, 2×, quality level 4
+(Ultra). That distinction is now preserved in Kraken rather than hiding it
+inside the conventional model picker or treating FLUX as an equivalent.
+
+**Decision:** Images mode has three explicit pipelines:
+
+1. **Faithful** — drop-in ONNX / RRDBNet image models, tiled when necessary.
+2. **Generative** — faithful pre-upscale plus low-denoise FLUX tile refine.
+3. **RTX VSR** — NVIDIA's fast proprietary Video Effects SDK pass.
+
+Kraken calls the SDK's native C API directly. It does not load ComfyUI or an
+external scripting runtime. The NVIDIA DLLs remain an optional, ignored
+`rtx-vsr/` payload because they are proprietary redistributables, unlike the
+MIT-licensed Kraken source. Missing files disable the segment instead of
+causing a hidden fallback.
+
+The 16K protection from the tested RTX-VSR-PRO node is retained: VSR itself is
+limited to a verified 15,360px edge, targets through 16,384px receive a final
+exact resize, and channel collapse aborts output. This is intentionally a
+faithful, fast choice. It should not gain prompt or denoise controls that imply
+generative reconstruction.
