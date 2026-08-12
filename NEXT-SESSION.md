@@ -56,6 +56,12 @@ are already job-local; an active preview finishes and releases itself. During
 export it becomes **Cancel + Release GPU**, stops the active work first, then
 clears sessions. It cannot affect VRAM owned by another process.
 
+The persistent activity log is deliberately verbose. Preview and export work
+is split into named START/STEP/PROCESSING/FINALIZING/COMPLETE/FAILED entries
+covering source preparation, model/runtime loading, GPU work, optional stages,
+output writing, timings, and error context. Video export progress is throttled
+to useful percentage milestones rather than one line per frame.
+
 Generative Refine uses the pinned FLUX.1 Dev Q6_K GGUF on the 3090. Do not
 restore the former 23.8 GB FP32 manifest: it forced system-memory layer
 streaming and measured about 161 seconds per diffusion step. Q6 completed the

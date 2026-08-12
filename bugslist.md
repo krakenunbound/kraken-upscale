@@ -10,13 +10,37 @@ copy claims it is already active.
 **Method:** full pass over `src/*.rs` and the export/preview control surface in
 `ui/app.slint`. No fixes applied in this pass — findings only.
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 ---
 
 > **Status 2026-08-07:** every finding below is closed. B33 and B35–B42 were
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
+
+### B51 — Activity log described progress but not the pipeline
+
+- **Where:** video previews, all three image preview paths, video/image/RTX VSR/
+  Generative exports, and failure reporting
+- **What:** the log showed generic model-load messages and tile counters but did
+  not say which source-preparation, GPU, temporal, finishing, or output stage
+  was running. Export queue progress was visible in the row but mostly absent
+  from the persistent activity log.
+- **Impact:** a healthy long operation could look opaque, and diagnosing a stall
+  or bad result required guessing what happened before and after inference.
+- **Fix:** added named START/STEP/PROCESSING/FINALIZING/COMPLETE/FAILED entries.
+  The trace now records source format and treatment, decode and model-load
+  timing, exact dimensions, model file/precision/provider, temporal window,
+  tile/overlap/stride counts, enabled RIFE/color/limit/blend/stability stages,
+  codec/CQ/audio behavior, useful milestone ETAs, generative pre-upscale and
+  refine phases, output path/byte size, and precise cancellation/error context.
+  Long video exports log percentage milestones instead of every frame.
+- **Verification:** compile, all 40 normal tests, strict warning checks, release
+  build, and a real release-app trace using `SpaceVoyage_2.mp4`. The trace
+  covered decode/RIFE source preparation, model file and 0.03-second CUDA load,
+  the genuine five-frame window, all 15 effective GPU tiles with ETA, color and
+  exact-resize finishing, and successful completion in 4.6 seconds.
+- [x] B51 — activity log provides a readable step-by-step pipeline trace
 
 ### B50 — The good RTX VSR image path existed only in ComfyUI
 

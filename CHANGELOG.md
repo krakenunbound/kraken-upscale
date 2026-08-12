@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — step-by-step activity logging
+
+- Replaced opaque preview/export messages with named pipeline stages:
+  START, STEP, PROCESSING, FINALIZING, COMPLETE, CANCELLED, and FAILED.
+- Video previews now log source treatment and decode timing, output and tile
+  plans, model file/precision/provider/load timing, temporal-window input,
+  optional RIFE/color/limit/blend/stability work, GPU tile progress, and the
+  exact stage that failed.
+- Faithful and RTX VSR image previews now log decode, runtime/model load,
+  geometry, CUDA tiling or native VSR work, finishing, integrity checks, and
+  completion timing.
+- Queue exports now persist useful progress milestones and ETAs, the full
+  decode/model/temporal/finish/encode plan, model reuse, output path and byte
+  size, generative pre-upscale/refine phases, and detailed cancellation/error
+  context. Long clips are throttled to percentage milestones to keep the log
+  readable.
+- Release-verified the trace with `SpaceVoyage_2.mp4`: it reported RIFE source
+  preparation, the exact model file and CUDA load, five-frame NanoVSR input,
+  all 15 effective tiles with ETA, finishing stages, and completion in 4.6s.
+- Built both easy-launch copies from the final release (42,925,056 bytes;
+  SHA-256 `7A23E44F277859EE20316DE09076C61113592027792270CDD2AB08641072FB56`).
+
 ## Unreleased — native NVIDIA RTX VSR image mode
 
 - Added **RTX VSR** beside Faithful and Generative in Images mode. The same

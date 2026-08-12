@@ -105,6 +105,24 @@ enum ExportCommand {
 }
 
 impl TaskSpec {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Video(_) => "VIDEO EXPORT",
+            Self::Image(_) => "IMAGE EXPORT",
+            Self::Generative(_) => "GENERATIVE EXPORT",
+            Self::RtxImage(_) => "RTX VSR EXPORT",
+        }
+    }
+
+    fn source_name(&self) -> String {
+        match self {
+            Self::Video(spec) => spec.clip.file_name(),
+            Self::Image(spec) => spec.image.file_name(),
+            Self::Generative(spec) => spec.conventional.image.file_name(),
+            Self::RtxImage(spec) => spec.image.file_name(),
+        }
+    }
+
     fn model(&self) -> Option<&upscale::ModelEntry> {
         match self {
             Self::Video(spec) => Some(&spec.model),
@@ -131,6 +149,46 @@ impl TaskSpec {
             Self::RtxImage(spec) => &spec.out_path,
         }
     }
+}
+
+fn log_step(
+    handle: &slint::Weak<MainWindow>,
+    operation: &str,
+    step: u32,
+    detail: impl std::fmt::Display,
+) {
+    log(handle, format!("{operation} · STEP {step} — {detail}"));
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
+fn source_treatment_description(
+    treatment: media::SourceTreatment,
+    clip: &media::ClipInfo,
+) -> String {
+    let content = match treatment.content {
+        0 => "AI generated video",
+        1 => "Film / movie (24p)",
+        2 => "TV — shot on film",
+        3 => "TV — shot on video",
+        4 => "Modern digital",
+        _ => "unknown",
+    };
+    let restore = match treatment.restore {
+        0 => "none",
+        1 => "light deblock",
+        2 => "DVD/MPEG-2 deblock",
+        3 => "heavy-compression cleanup",
+        _ => "unknown",
+    };
+    let fields = match treatment.field_policy(clip) {
+        media::FieldPolicy::None => "no field processing",
+        media::FieldPolicy::InverseTelecine => "inverse telecine",
+        media::FieldPolicy::Deinterlace => "deinterlace",
+    };
+    format!("profile {content} · restore {restore} · {fields}")
 }
 
 fn model_labels(models: &[upscale::ModelEntry]) -> ModelRc<slint::SharedString> {
@@ -1321,6 +1379,30 @@ fn spawn_preview_worker(
             let started = std::time::Instant::now();
             let mut rife_model: Option<interpolate::Rife> = None;
 
+            log(
+                &handle,
+                format!(
+                    "VIDEO PREVIEW · START — {} at {:.3}s · source {}×{} {} {} · requested {}x",
+                    job.clip.file_name(),
+                    job.at_secs,
+                    job.clip.width,
+                    job.clip.height,
+                    job.clip.codec,
+                    job.clip.pix_fmt,
+                    job.target_scale,
+                ),
+            );
+            log_step(
+                &handle,
+                "VIDEO PREVIEW",
+                1,
+                format!(
+                    "Decode and prepare source frame · {}",
+                    source_treatment_description(job.source_treatment, &job.clip)
+                ),
+            );
+            let decode_started = std::time::Instant::now();
+
             let (source, interpolation_note) =
                 match decode_preview_source(&job, &mut rife_model, &handle) {
                     Ok(result) => result,
@@ -1337,6 +1419,19 @@ fn spawn_preview_worker(
                         continue;
                     }
                 };
+            log(
+                &handle,
+                format!(
+                    "VIDEO PREVIEW · STEP 1 DONE — prepared {}×{} RGB frame in {:.2}s{}",
+                    source.width,
+                    source.height,
+                    decode_started.elapsed().as_secs_f32(),
+                    interpolation_note
+                        .as_deref()
+                        .map(|note| format!(" · {note}"))
+                        .unwrap_or_default()
+                ),
+            );
 
             if current_generation.load(Ordering::Relaxed) == job.generation {
                 let h = handle.clone();
@@ -1356,31 +1451,34 @@ fn spawn_preview_worker(
 
             let listed_scale = job.model.scale.max(1);
             let preview_tile = job.tile.min(4096 / listed_scale).max(64);
-            let step = preview_tile.saturating_sub(OVERLAP * 2).max(16);
-            let tiles = source.width.div_ceil(step) * source.height.div_ceil(step);
-            log(
+            log_step(
                 &handle,
+                "VIDEO PREVIEW",
+                2,
                 format!(
-                    "preview started: {} at {:.2}s · {}×{} → {}×{} · {} · {}px tiles ({tiles} total)",
-                    job.clip.file_name(),
-                    job.at_secs,
-                    source.width,
-                    source.height,
+                    "Plan output {}×{} · model {} ({}x native, {}-frame window) · requested tile ceiling {}px · {}px overlap; exact effective grid follows after model validation",
                     source.width.saturating_mul(job.target_scale),
                     source.height.saturating_mul(job.target_scale),
                     job.model.name,
+                    listed_scale,
+                    job.model.temporal_frames.max(1),
                     preview_tile,
+                    OVERLAP,
                 ),
             );
 
-            log(
+            log_step(
                 &handle,
+                "VIDEO PREVIEW",
+                3,
                 format!(
-                    "preview: loading {} ({})",
+                    "Load model {} from {} · precision {}",
                     job.model.name,
-                    if job.fp16 { "fp16 preferred" } else { "fp32" }
+                    job.model.file,
+                    if job.fp16 { "FP16 preferred" } else { "FP32" }
                 ),
             );
+            let model_load_started = std::time::Instant::now();
             let mut up = match upscale::Engine::load(&job.model, job.fp16) {
                 Ok(up) => up,
                 Err(e) => {
@@ -1398,11 +1496,12 @@ fn spawn_preview_worker(
             log(
                 &handle,
                 format!(
-                    "loaded {} · {}x native · {} · {}",
+                    "VIDEO PREVIEW · STEP 3 DONE — loaded {} · {}x native · {} · provider {} · {:.2}s",
                     job.model.name,
                     up.scale(),
                     if job.fp16 { "fp16" } else { "fp32" },
-                    up.provider()
+                    up.provider(),
+                    model_load_started.elapsed().as_secs_f32(),
                 ),
             );
             // Report what ORT actually registered, not what was requested —
@@ -1436,6 +1535,22 @@ fn spawn_preview_worker(
                 continue;
             }
             let preview_tile = up.effective_tile(preview_tile);
+            let effective_step = preview_tile.saturating_sub(OVERLAP * 2).max(16);
+            let effective_tiles =
+                source.width.div_ceil(effective_step) * source.height.div_ceil(effective_step);
+            log_step(
+                &handle,
+                "VIDEO PREVIEW",
+                4,
+                format!(
+                    "Run CUDA inference · effective tile {}px · overlap {}px · stride {}px · {} tiled inference calls · batch window {} frame(s)",
+                    preview_tile,
+                    OVERLAP,
+                    effective_step,
+                    effective_tiles,
+                    up.window()
+                ),
+            );
 
             // Feed tile progress back so the status bar fills as the frame
             // resolves rather than sitting blank for several seconds.
@@ -1465,7 +1580,7 @@ fn spawn_preview_worker(
                     log(
                         &progress_handle,
                         format!(
-                            "preview: tile {done}/{total} ({:.0}%) · {} elapsed{finish}",
+                            "VIDEO PREVIEW · GPU tile {done}/{total} ({:.0}%) · {} elapsed{finish}",
                             frac * 100.0,
                             human_duration(elapsed)
                         ),
@@ -1539,6 +1654,16 @@ fn spawn_preview_worker(
                 frames
             };
             let preview_pick = preview_sources.len() / 2;
+            if preview_sources.len() > 1 {
+                log(
+                    &handle,
+                    format!(
+                        "VIDEO PREVIEW · STEP 4 DETAIL — decoded {} neighboring frames for genuine temporal model input; center index {}",
+                        preview_sources.len(),
+                        preview_pick
+                    ),
+                );
+            }
 
             match up.run_batch(&preview_sources, preview_tile, OVERLAP, &mut on_progress) {
                 Ok(outputs) => {
@@ -1552,6 +1677,19 @@ fn spawn_preview_worker(
                         );
                         continue;
                     };
+                    log_step(
+                        &handle,
+                        "VIDEO PREVIEW",
+                        5,
+                        format!(
+                            "Post-process model output · color match {} · detail limit {:.2} · source blend strength {:.2} · exact resize to {}×{}",
+                            on_off(job.match_color),
+                            job.detail_limit,
+                            job.strength,
+                            source.width.saturating_mul(job.target_scale),
+                            source.height.saturating_mul(job.target_scale)
+                        ),
+                    );
                     let mut final_frame = finish(out, &source);
                     let mut lock_note = None;
 
@@ -1560,6 +1698,15 @@ fn spawn_preview_worker(
                     // the Lock and Cut detect sliders can only be judged by
                     // running a full export.
                     if job.stability && up.window() == 1 && job.at_secs > 0.0 {
+                        log_step(
+                            &handle,
+                            "VIDEO PREVIEW",
+                            6,
+                            format!(
+                                "Analyze previous frame and apply temporal lock · strength {:.2} · cut sensitivity {:.2}",
+                                job.lock_strength, job.cut_detect
+                            ),
+                        );
                         let step = 1.0 / job.clip.fps.max(1.0);
                         let prev_at = (job.at_secs - step).max(0.0);
                         match media::frame_at_with(&job.clip, prev_at, None, job.source_treatment)
@@ -1639,7 +1786,7 @@ fn spawn_preview_worker(
                         secs,
                         up.provider()
                     );
-                    log(&handle, format!("preview completed: {note}"));
+                    log(&handle, format!("VIDEO PREVIEW · COMPLETE — {note}"));
                     report_current(
                         &handle,
                         &current_generation,
@@ -1649,7 +1796,7 @@ fn spawn_preview_worker(
                     );
                 }
                 Err(e) => {
-                    log(&handle, format!("preview failed: {e}"));
+                    log(&handle, format!("VIDEO PREVIEW · FAILED during CUDA inference — {e}"));
                     report_current(
                         &handle,
                         &current_generation,
@@ -1748,6 +1895,21 @@ fn spawn_image_preview_worker(
             }
 
             let started = std::time::Instant::now();
+            log(
+                &handle,
+                format!(
+                    "IMAGE PREVIEW · START — {} · {}×{} {} {} · alpha {} · requested {}x",
+                    job.image.file_name(),
+                    job.image.width,
+                    job.image.height,
+                    job.image.codec,
+                    job.image.pix_fmt,
+                    on_off(job.image.has_alpha),
+                    job.target_scale
+                ),
+            );
+            log_step(&handle, "IMAGE PREVIEW", 1, "Decode source image to RGB");
+            let decode_started = std::time::Instant::now();
             let source = match image_mode::decode(&job.image) {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -1762,6 +1924,15 @@ fn spawn_image_preview_worker(
                     continue;
                 }
             };
+            log(
+                &handle,
+                format!(
+                    "IMAGE PREVIEW · STEP 1 DONE — decoded {}×{} RGB in {:.2}s",
+                    source.width,
+                    source.height,
+                    decode_started.elapsed().as_secs_f32()
+                ),
+            );
 
             if current_generation.load(Ordering::Relaxed) == job.generation {
                 let h = handle.clone();
@@ -1781,11 +1952,28 @@ fn spawn_image_preview_worker(
             }
 
             if let Some(quality) = job.rtx_quality {
-                log(
+                log_step(
                     &handle,
+                    "IMAGE PREVIEW",
+                    2,
                     format!(
-                        "image preview: NVIDIA RTX VSR {} · {}x",
+                        "Load NVIDIA RTX VSR native runtime from {} · quality {}",
+                        rtx_vsr::runtime_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "missing runtime".into()),
                         quality.label(),
+                    ),
+                );
+                log_step(
+                    &handle,
+                    "IMAGE PREVIEW",
+                    3,
+                    format!(
+                        "Allocate CUDA buffers and run VSR · {}×{} → {}×{} · exact {}x output",
+                        source.width,
+                        source.height,
+                        source.width.saturating_mul(job.target_scale),
+                        source.height.saturating_mul(job.target_scale),
                         job.target_scale
                     ),
                 );
@@ -1798,6 +1986,15 @@ fn spawn_image_preview_worker(
                 let result = rtx_vsr::upscale_frame(&source, job.target_scale, quality);
                 match result {
                     Ok(output) => {
+                        log_step(
+                            &handle,
+                            "IMAGE PREVIEW",
+                            4,
+                            format!(
+                                "Validate RGB channels and prepare {}×{} preview",
+                                output.width, output.height
+                            ),
+                        );
                         let elapsed = started.elapsed().as_secs_f32();
                         let note = format!(
                             "NVIDIA RTX VSR {} · {}x · {:.1}s on CUDA",
@@ -1805,7 +2002,7 @@ fn spawn_image_preview_worker(
                             job.target_scale,
                             elapsed
                         );
-                        log(&handle, format!("image preview completed: {note}"));
+                        log(&handle, format!("IMAGE PREVIEW · COMPLETE — {note}"));
                         report_current(
                             &handle,
                             &current_generation,
@@ -1815,7 +2012,10 @@ fn spawn_image_preview_worker(
                         );
                     }
                     Err(error) => {
-                        log(&handle, format!("RTX VSR preview failed: {error}"));
+                        log(
+                            &handle,
+                            format!("IMAGE PREVIEW · FAILED in RTX VSR stage — {error}"),
+                        );
                         report_current(
                             &handle,
                             &current_generation,
@@ -1828,10 +2028,18 @@ fn spawn_image_preview_worker(
                 continue;
             }
 
-            log(
+            log_step(
                 &handle,
-                format!("image preview: loading {}", job.model.name),
+                "IMAGE PREVIEW",
+                2,
+                format!(
+                    "Load ONNX model {} from {} · precision {}",
+                    job.model.name,
+                    job.model.file,
+                    if job.fp16 { "FP16 preferred" } else { "FP32" }
+                ),
             );
+            let model_load_started = std::time::Instant::now();
             let mut engine = match upscale::Engine::load(&job.model, job.fp16) {
                 Ok(engine) => engine,
                 Err(error) => {
@@ -1846,6 +2054,15 @@ fn spawn_image_preview_worker(
                     continue;
                 }
             };
+            log(
+                &handle,
+                format!(
+                    "IMAGE PREVIEW · STEP 2 DONE — model ready in {:.2}s · provider {} · native scale {}x",
+                    model_load_started.elapsed().as_secs_f32(),
+                    engine.provider(),
+                    engine.scale()
+                ),
+            );
             if engine.window() != 1 {
                 report_current(
                     &handle,
@@ -1870,6 +2087,19 @@ fn spawn_image_preview_worker(
             let progress_handle = handle.clone();
             let progress_generation = current_generation.clone();
             let wanted = job.generation;
+            let inference_started = std::time::Instant::now();
+            let effective_tile = engine.effective_tile(job.tile);
+            let stride = effective_tile.saturating_sub(OVERLAP * 2).max(16);
+            let tile_total = source.width.div_ceil(stride) * source.height.div_ceil(stride);
+            log_step(
+                &handle,
+                "IMAGE PREVIEW",
+                3,
+                format!(
+                    "Run CUDA inference · {}px tiles · {}px overlap · {}px stride · {tile_total} GPU tile(s)",
+                    effective_tile, OVERLAP, stride
+                ),
+            );
             let mut on_progress = move |done: u32, total: u32| {
                 if progress_generation.load(Ordering::Relaxed) != wanted {
                     return;
@@ -1879,6 +2109,16 @@ fn spawn_image_preview_worker(
                 } else {
                     done as f32 / total as f32
                 };
+                if done > 0 {
+                    log(
+                        &progress_handle,
+                        format!(
+                            "IMAGE PREVIEW · GPU tile {done}/{total} ({:.0}%) · {} elapsed",
+                            fraction * 100.0,
+                            human_duration(inference_started.elapsed().as_secs_f64())
+                        ),
+                    );
+                }
                 let h = progress_handle.clone();
                 let generation = progress_generation.clone();
                 let _ = slint::invoke_from_event_loop(move || {
@@ -1904,6 +2144,19 @@ fn spawn_image_preview_worker(
                     .ok_or_else(|| "image model returned no frame".to_string())
             }) {
                 Ok(model_output) => {
+                    log_step(
+                        &handle,
+                        "IMAGE PREVIEW",
+                        4,
+                        format!(
+                            "Finish image · color match {} · detail limit {:.2} · source blend {:.2} · resize to exact {}×{}",
+                            on_off(job.match_color),
+                            job.detail_limit,
+                            job.strength,
+                            source.width.saturating_mul(job.target_scale),
+                            source.height.saturating_mul(job.target_scale)
+                        ),
+                    );
                     let spec = image_mode::ExportSpec {
                         image: job.image.clone(),
                         model: job.model.clone(),
@@ -1924,7 +2177,7 @@ fn spawn_image_preview_worker(
                         started.elapsed().as_secs_f32(),
                         engine.provider()
                     );
-                    log(&handle, format!("image preview completed: {note}"));
+                    log(&handle, format!("IMAGE PREVIEW · COMPLETE — {note}"));
                     report_current(
                         &handle,
                         &current_generation,
@@ -1934,7 +2187,10 @@ fn spawn_image_preview_worker(
                     );
                 }
                 Err(error) => {
-                    log(&handle, format!("image preview failed: {error}"));
+                    log(
+                        &handle,
+                        format!("IMAGE PREVIEW · FAILED during model or finish stage — {error}"),
+                    );
                     report_current(
                         &handle,
                         &current_generation,
@@ -1988,6 +2244,10 @@ fn spawn_exporter(
                 *slot = Some(cancel.clone());
             }
             set_export_running(&handle, true);
+            log(
+                &handle,
+                format!("EXPORT BATCH · START — {} queued task(s)", batch.len()),
+            );
 
             for (idx, spec) in batch {
                 if cancel.load(Ordering::Relaxed) {
@@ -1995,6 +2255,15 @@ fn spawn_exporter(
                     continue;
                 }
                 set_task(&handle, idx, 0.0, "loading model", true, false);
+                log(
+                    &handle,
+                    format!(
+                        "{} · START — source {} · output {}",
+                        spec.kind(),
+                        spec.source_name(),
+                        spec.out_path().display()
+                    ),
+                );
 
                 if let (Some(model), Some(fp16)) = (spec.model().cloned(), spec.fp16()) {
                     let stale = loaded
@@ -2002,15 +2271,29 @@ fn spawn_exporter(
                         .map(|(name, half, _)| name != &model.name || *half != fp16)
                         .unwrap_or(true);
                     if stale {
+                        log_step(
+                            &handle,
+                            spec.kind(),
+                            1,
+                            format!(
+                                "Load model {} from {} · precision {}",
+                                model.name,
+                                model.file,
+                                if fp16 { "FP16 preferred" } else { "FP32" }
+                            ),
+                        );
+                        let load_started = std::time::Instant::now();
                         match upscale::Engine::load(&model, fp16) {
                             Ok(u) => {
                                 log(
                                     &handle,
                                     format!(
-                                        "export: loaded {} ({}x native) on {}",
+                                        "{} · STEP 1 DONE — loaded {} · {}x native · provider {} · {:.2}s",
+                                        spec.kind(),
                                         model.name,
                                         u.scale(),
-                                        u.provider()
+                                        u.provider(),
+                                        load_started.elapsed().as_secs_f32()
                                     ),
                                 );
                                 loaded = Some((model.name.clone(), fp16, u));
@@ -2021,6 +2304,18 @@ fn spawn_exporter(
                                 continue;
                             }
                         }
+                    } else if let Some((_, _, engine)) = loaded.as_ref() {
+                        log_step(
+                            &handle,
+                            spec.kind(),
+                            1,
+                            format!(
+                                "Reuse cached model {} · {}x native · provider {} · no reload needed",
+                                model.name,
+                                engine.scale(),
+                                engine.provider()
+                            ),
+                        );
                     }
                     let provider = loaded
                         .as_ref()
@@ -2039,6 +2334,12 @@ fn spawn_exporter(
                     // ONNX/RIFE sessions first so it gets the card cleanly.
                     loaded = None;
                     rife_model = None;
+                    log_step(
+                        &handle,
+                        spec.kind(),
+                        1,
+                        "Release idle ONNX and RIFE sessions so RTX VSR receives available GPU memory",
+                    );
                 }
 
                 let needs_rife = matches!(
@@ -2047,11 +2348,23 @@ fn spawn_exporter(
                 );
                 if needs_rife && rife_model.is_none() {
                     set_task(&handle, idx, 0.0, "loading RIFE", true, false);
+                    log_step(
+                        &handle,
+                        spec.kind(),
+                        2,
+                        "Load RIFE timestep model for genuine frame interpolation",
+                    );
+                    let rife_started = std::time::Instant::now();
                     match interpolate::Rife::load() {
                         Ok(rife) => {
                             log(
                                 &handle,
-                                format!("export: loaded RIFE interpolation on {}", rife.provider),
+                                format!(
+                                    "{} · STEP 2 DONE — RIFE ready on {} in {:.2}s",
+                                    spec.kind(),
+                                    rife.provider,
+                                    rife_started.elapsed().as_secs_f32()
+                                ),
                             );
                             rife_model = Some(rife);
                         }
@@ -2061,68 +2374,111 @@ fn spawn_exporter(
                             continue;
                         }
                     }
+                } else if needs_rife {
+                    let provider = rife_model
+                        .as_ref()
+                        .map(|rife| rife.provider)
+                        .unwrap_or("missing");
+                    log_step(
+                        &handle,
+                        spec.kind(),
+                        2,
+                        format!("Reuse cached RIFE interpolation model · provider {provider}"),
+                    );
+                } else {
+                    let detail = match &spec {
+                        TaskSpec::Video(_) => {
+                            "Frame interpolation disabled; preserve the prepared source frame rate"
+                        }
+                        TaskSpec::Image(_) | TaskSpec::Generative(_) | TaskSpec::RtxImage(_) => {
+                            "No temporal stage: still-image task"
+                        }
+                    };
+                    log_step(&handle, spec.kind(), 2, detail);
                 }
 
-                match &spec {
-                    TaskSpec::Video(video) => log(
-                        &handle,
-                        format!(
-                            "video export started: {} · {} frames at {} fps{} · color match {}",
-                            video.clip.file_name(),
-                            video.output_frames(),
-                            video.output_fps(),
-                            video
-                                .interpolation_fps
-                                .map(|_| " · RIFE")
-                                .unwrap_or_default(),
-                            if video.match_color { "on" } else { "off" }
-                        ),
+                let plan = match &spec {
+                    TaskSpec::Video(video) => format!(
+                        "Prepare decode → model → finish → encode pipeline · {}×{} {} {} at {:.3} fps → {}×{} · {} output frames at {} fps · RIFE {} · color match {} · stability {} (strength {:.2}, cut {:.2}) · tile {}px/overlap {}px · {} CQ {} · audio copy",
+                        video.clip.width,
+                        video.clip.height,
+                        video.clip.codec,
+                        video.clip.pix_fmt,
+                        video.clip.fps,
+                        video.output_size().0,
+                        video.output_size().1,
+                        video.output_frames(),
+                        video.output_fps(),
+                        video
+                            .interpolation_fps
+                            .map(|fps| format!("on → {fps} fps"))
+                            .unwrap_or_else(|| "off".into()),
+                        on_off(video.match_color),
+                        on_off(video.stability),
+                        video.lock_strength,
+                        video.cut_detect,
+                        video.tile,
+                        OVERLAP,
+                        video.codec,
+                        video.cq,
                     ),
-                    TaskSpec::Image(image) => log(
-                        &handle,
-                        format!(
-                            "image export started: {} · {}×{} → {}×{} · {} · color match {}",
-                            image.image.file_name(),
-                            image.image.width,
-                            image.image.height,
-                            image.output_size().0,
-                            image.output_size().1,
-                            image.model.name,
-                            if image.match_color { "on" } else { "off" }
-                        ),
+                    TaskSpec::Image(image) => format!(
+                        "Prepare decode → tiled model → finish → PNG pipeline · {}×{} {} {} → {}×{} · model {} · tile {}px/overlap {}px · color match {} · detail limit {:.2} · source blend {:.2} · alpha restore {}",
+                        image.image.width,
+                        image.image.height,
+                        image.image.codec,
+                        image.image.pix_fmt,
+                        image.output_size().0,
+                        image.output_size().1,
+                        image.model.name,
+                        image.tile,
+                        OVERLAP,
+                        on_off(image.match_color),
+                        image.detail_limit,
+                        image.strength,
+                        on_off(image.image.has_alpha),
                     ),
-                    TaskSpec::Generative(image) => log(
-                        &handle,
-                        format!(
-                            "generative image export started: {} · {}×{} → {}×{} · {} pre-upscale → {} native tile refine · denoise {:.2} · {} steps · {}px tiles",
-                            image.conventional.image.file_name(),
-                            image.conventional.image.width,
-                            image.conventional.image.height,
-                            image.output_size().0,
-                            image.output_size().1,
-                            image.conventional.model.name,
-                            image.package.name,
-                            image.denoise,
-                            image.steps,
-                            image.refine_tile
-                        ),
+                    TaskSpec::Generative(image) => format!(
+                        "Prepare faithful pre-upscale → native generative tile refine → blend → PNG pipeline · {}×{} → {}×{} · {} then {} · denoise {:.2} · {} steps · {}px refine tiles · quality finish {}",
+                        image.conventional.image.width,
+                        image.conventional.image.height,
+                        image.output_size().0,
+                        image.output_size().1,
+                        image.conventional.model.name,
+                        image.package.name,
+                        image.denoise,
+                        image.steps,
+                        image.refine_tile,
+                        on_off(image.quality_finish),
                     ),
-                    TaskSpec::RtxImage(image) => log(
-                        &handle,
-                        format!(
-                            "RTX VSR image export started: {} · {}×{} → {}×{} · {} · native CUDA",
-                            image.image.file_name(),
-                            image.image.width,
-                            image.image.height,
-                            image.output_size().0,
-                            image.output_size().1,
-                            image.quality.label()
-                        ),
+                    TaskSpec::RtxImage(image) => format!(
+                        "Prepare decode → native NVIDIA VSR → RGB integrity check → PNG pipeline · {}×{} {} {} → {}×{} · quality {} · runtime {}",
+                        image.image.width,
+                        image.image.height,
+                        image.image.codec,
+                        image.image.pix_fmt,
+                        image.output_size().0,
+                        image.output_size().1,
+                        image.quality.label(),
+                        rtx_vsr::runtime_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "missing".into()),
                     ),
-                }
+                };
+                log_step(&handle, spec.kind(), 3, plan);
+                log_step(
+                    &handle,
+                    spec.kind(),
+                    4,
+                    "Begin processing; progress milestones and estimated time follow",
+                );
 
                 let started = std::time::Instant::now();
                 let progress_handle = handle.clone();
+                let progress_kind = spec.kind().to_string();
+                let progress_is_video = matches!(&spec, TaskSpec::Video(_));
+                let progress_is_rtx = matches!(&spec, TaskSpec::RtxImage(_));
+                let mut last_logged_bucket = 0u64;
                 let mut on_progress = move |done: u64, total: u64| {
                     let frac = if total == 0 {
                         0.0
@@ -2149,6 +2505,50 @@ fn spawn_exporter(
                     } else {
                         format!("{done}/{total}")
                     };
+                    let bucket = if total == 0 {
+                        0
+                    } else {
+                        done.saturating_mul(10).saturating_div(total).min(10)
+                    };
+                    if done > 0 && (done == 1 || done >= total || bucket > last_logged_bucket) {
+                        last_logged_bucket = bucket;
+                        let elapsed = human_duration(started.elapsed().as_secs_f64());
+                        let detail = if progress_is_rtx {
+                            match done {
+                                1 => "source image decoded to RGB".to_string(),
+                                2 => "native RTX VSR processing and integrity check complete".to_string(),
+                                _ => "lossless PNG written".to_string(),
+                            }
+                        } else if progress_is_video {
+                            format!("processed frame {done}/{total}")
+                        } else {
+                            format!("completed GPU tile/work unit {done}/{total}")
+                        };
+                        let eta = if done >= 2 && done < total {
+                            let per = started.elapsed().as_secs_f64() / done as f64;
+                            format!(
+                                " · about {} remaining",
+                                human_duration(per * (total - done) as f64)
+                            )
+                        } else {
+                            String::new()
+                        };
+                        log(
+                            &progress_handle,
+                            format!(
+                                "{progress_kind} · PROCESSING {:.0}% — {detail} · {elapsed} elapsed{eta}",
+                                frac * 100.0
+                            ),
+                        );
+                        if done >= total && total > 0 {
+                            log(
+                                &progress_handle,
+                                format!(
+                                    "{progress_kind} · FINALIZING — flush encoder or write output file and verify completion"
+                                ),
+                            );
+                        }
+                    }
                     let h = progress_handle.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = h.upgrade() {
@@ -2189,12 +2589,32 @@ fn spawn_exporter(
                     },
                     TaskSpec::Generative(image) => {
                         let progress_handle = handle.clone();
+                        let mut pre_last_bucket = 0u64;
                         let mut pre_progress = move |done: u64, total: u64| {
                             let fraction = if total == 0 {
                                 0.0
                             } else {
                                 0.15 * done as f32 / total as f32
                             };
+                            let bucket = if total == 0 {
+                                0
+                            } else {
+                                done.saturating_mul(4).saturating_div(total).min(4)
+                            };
+                            if done > 0 && (done == 1 || done >= total || bucket > pre_last_bucket) {
+                                pre_last_bucket = bucket;
+                                log(
+                                    &progress_handle,
+                                    format!(
+                                        "GENERATIVE EXPORT · FAITHFUL PRE-UPSCALE — tile {done}/{total} ({:.0}% of pre-upscale)",
+                                        if total == 0 {
+                                            0.0
+                                        } else {
+                                            done as f32 / total as f32 * 100.0
+                                        }
+                                    ),
+                                );
+                            }
                             set_task(
                                 &progress_handle,
                                 idx,
@@ -2221,9 +2641,28 @@ fn spawn_exporter(
                         rife_model = None;
                         match pre_upscaled {
                             Ok(canvas) => {
+                                log(
+                                    &handle,
+                                    format!(
+                                        "GENERATIVE EXPORT · PRE-UPSCALE DONE — faithful canvas {}×{} ready; ONNX and RIFE sessions released before loading the refine model",
+                                        canvas.width, canvas.height
+                                    ),
+                                );
                                 let progress_handle = handle.clone();
+                                let mut last_refine_message = String::new();
                                 let mut refine_progress = move |done: f32, message: &str| {
                                     let fraction = 0.15 + 0.85 * done.clamp(0.0, 1.0);
+                                    if message != last_refine_message {
+                                        log(
+                                            &progress_handle,
+                                            format!(
+                                                "GENERATIVE EXPORT · REFINE {:.0}% — {message}",
+                                                done.clamp(0.0, 1.0) * 100.0
+                                            ),
+                                        );
+                                        last_refine_message.clear();
+                                        last_refine_message.push_str(message);
+                                    }
                                     set_task(&progress_handle, idx, fraction, message, true, false);
                                 };
                                 generative::refine(
@@ -2254,9 +2693,17 @@ fn spawn_exporter(
                             false,
                             false,
                         );
+                        let output_size = std::fs::metadata(spec.out_path())
+                            .map(|metadata| format!("{} bytes", metadata.len()))
+                            .unwrap_or_else(|_| "size unavailable".into());
                         log(
                             &handle,
-                            format!("exported {} in {duration}", spec.out_path().display()),
+                            format!(
+                                "{} · COMPLETE — wrote {} · {} · {duration} total",
+                                spec.kind(),
+                                spec.out_path().display(),
+                                output_size
+                            ),
                         );
                         // Phase 0 baseline: where the time actually went, so
                         // later pipeline stages have something to be measured
@@ -2268,12 +2715,25 @@ fn spawn_exporter(
                     Err(e) if e == "cancelled" => {
                         log(
                             &handle,
-                            format!("export cancelled: {}", spec.out_path().display()),
+                            format!(
+                                "{} · CANCELLED — partial output removed: {}",
+                                spec.kind(),
+                                spec.out_path().display()
+                            ),
                         );
                         set_task(&handle, idx, 0.0, "cancelled", false, false);
                     }
                     Err(e) => {
-                        log(&handle, format!("export failed: {e}"));
+                        log(
+                            &handle,
+                            format!(
+                                "{} · FAILED after {} — source {} · output {} · error: {e}",
+                                spec.kind(),
+                                human_duration(started.elapsed().as_secs_f64()),
+                                spec.source_name(),
+                                spec.out_path().display()
+                            ),
+                        );
                         set_task(&handle, idx, 0.0, "failed", false, true);
                     }
                 }
@@ -2283,6 +2743,7 @@ fn spawn_exporter(
                 *slot = None;
             }
             set_export_running(&handle, false);
+            log(&handle, "EXPORT BATCH · COMPLETE — all scheduled tasks finished");
         }
     });
 
