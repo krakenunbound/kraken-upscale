@@ -11,6 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -89,6 +90,19 @@ impl ExportSpec {
             None if !self.clip.fps_rate.is_empty() => self.clip.fps_rate.clone(),
             None => "24/1".into(),
         }
+    }
+
+    pub fn output_duration(&self) -> f64 {
+        let rate = self.output_fps_rate();
+        let fps = rate
+            .split_once('/')
+            .and_then(|(numerator, denominator)| {
+                let numerator = numerator.parse::<f64>().ok()?;
+                let denominator = denominator.parse::<f64>().ok()?;
+                (numerator > 0.0 && denominator > 0.0).then_some(numerator / denominator)
+            })
+            .unwrap_or_else(|| self.output_fps().max(1) as f64);
+        self.output_frames() as f64 / fps
     }
 
     pub fn output_frames(&self) -> u64 {
@@ -180,9 +194,12 @@ fn spawn_encoder(spec: &ExportSpec) -> Result<Child, String> {
     if spec.out_path.extension().and_then(|ext| ext.to_str()) == Some("mp4") {
         cmd.args(["-movflags", "+faststart"]);
     }
-    if spec.copy_audio {
-        cmd.arg("-shortest");
-    }
+    // Bound the mux to the generated video's duration. `-shortest` cannot be
+    // used here: AI clips commonly have an audio stream that ends a fraction
+    // early, and ffmpeg would then close the raw-video pipe before Kraken had
+    // delivered every frame. `-t` trims overly long copied audio without ever
+    // allowing shorter audio to truncate the video.
+    cmd.arg("-t").arg(format!("{:.6}", spec.output_duration()));
     cmd.arg(&spec.out_path);
 
     cmd.stdin(Stdio::piped())
@@ -197,6 +214,19 @@ fn drain(mut pipe: impl Read + Send + 'static) -> JoinHandle<String> {
         let _ = pipe.read_to_string(&mut text);
         text
     })
+}
+
+/// Keep ffmpeg's useful tail readable in the one-line activity log. ffmpeg can
+/// emit pages of setup chatter before the actual failure; the final lines are
+/// normally the ones that explain why its pipe closed.
+fn diagnostic_tail(text: &str, max_lines: usize) -> String {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join(" | ")
 }
 
 /// Fills one raw frame while preserving the distinction `read_exact` loses:
@@ -239,6 +269,7 @@ pub fn run(
     cancel: Arc<AtomicBool>,
     on_progress: &mut dyn FnMut(u64, u64),
 ) -> Result<Stages, String> {
+    let run_started = Instant::now();
     let (sw, sh) = (spec.clip.width, spec.clip.height);
     let frame_bytes = (sw as usize) * (sh as usize) * 3;
     let total = spec.output_frames();
@@ -553,7 +584,30 @@ pub fn run(
 
     if let Err(e) = processing {
         remove_partial(&spec.out_path);
-        return Err(e);
+        // Cancellation is a normal user action and callers intentionally
+        // match this exact value. Do not decorate it with killed-child noise.
+        if e == "cancelled" {
+            return Err(e);
+        }
+
+        let mut details = Vec::new();
+        if e.starts_with("encode write failed") {
+            let tail = diagnostic_tail(&encoder_text, 8);
+            if !tail.is_empty() {
+                details.push(format!("ffmpeg encoder: {tail}"));
+            } else if let Ok(status) = &encoder_status {
+                details.push(format!("ffmpeg encoder exited with {status}"));
+            }
+        } else if e.starts_with("decode") || e.starts_with("decoder") {
+            let tail = diagnostic_tail(&decoder_text, 8);
+            if !tail.is_empty() {
+                details.push(format!("ffmpeg decoder: {tail}"));
+            } else if let Ok(status) = &decoder_status {
+                details.push(format!("ffmpeg decoder exited with {status}"));
+            }
+        }
+        details.push(format!("partial {}", stages.summary(run_started.elapsed())));
+        return Err(format!("{e} · {}", details.join(" · ")));
     }
     let decoder_status =
         decoder_status.map_err(|e| format!("decoder did not exit cleanly: {e}"))?;
@@ -631,6 +685,18 @@ mod tests {
     }
 
     #[test]
+    fn output_duration_tracks_generated_frames_not_audio() {
+        let mut job = spec(640, 480, 2);
+        job.clip.duration = 17.333_333;
+        job.clip.frames = 520;
+        job.clip.fps = 30.0;
+        job.clip.fps_rate = "30/1".into();
+        job.interpolation_fps = Some(60);
+        assert_eq!(job.output_frames(), 1040);
+        assert!((job.output_duration() - 17.333_333).abs() < 0.000_001);
+    }
+
+    #[test]
     fn frame_reader_distinguishes_clean_and_partial_eof() {
         let mut exact = std::io::Cursor::new(vec![1u8; 6]);
         let mut frame = [0u8; 6];
@@ -639,6 +705,12 @@ mod tests {
 
         let mut partial = std::io::Cursor::new(vec![1u8; 5]);
         assert!(read_frame(&mut partial, &mut frame).is_err());
+    }
+
+    #[test]
+    fn diagnostic_tail_keeps_the_last_nonempty_lines() {
+        let text = "setup\n\nfirst error\nsecond error\nactual cause\n";
+        assert_eq!(diagnostic_tail(text, 2), "second error | actual cause");
     }
 
     /// Settles the FP16 question, which earlier measurements could not.

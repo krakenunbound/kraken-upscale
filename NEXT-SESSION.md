@@ -56,6 +56,14 @@ The right settings drawer is 480px wide so the full model choices remain
 readable. Model labels intentionally use concise `Multi-frame`, `Frame`, or
 `Image` prefixes because the current application mode is already obvious.
 
+The LOGS drawer is chronological and follows its live bottom edge. Opening it
+during an upscale should immediately show the latest stage/progress line.
+If a video encoder or decoder exits early, the failure entry includes FFmpeg's
+diagnostic tail plus the timing collected for every completed output frame.
+Video duration is taken from the selected picture stream when available. The
+encoder is bounded to the generated frame duration rather than `-shortest`, so
+a short AI-video audio track cannot terminate the picture pipe early.
+
 Images mode also offers **RTX VSR**, a fast faithful NVIDIA backend separate
 from both the ONNX model path and Generative Refine. It calls the Video Effects
 SDK directly using the optional `rtx-vsr/` payload beside the executable.

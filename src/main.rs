@@ -3023,10 +3023,13 @@ fn log(handle: &slint::Weak<MainWindow>, msg: impl Into<String>) {
             .as_any()
             .downcast_ref::<VecModel<slint::SharedString>>()
         {
-            vm.insert(0, format!("{stamp}  {msg}").into());
+            vm.push(format!("{stamp}  {msg}").into());
             while vm.row_count() > LOG_CAPACITY {
-                vm.remove(vm.row_count() - 1);
+                vm.remove(0);
             }
+            // Keep a running job's newest activity visible. ScrollView clamps
+            // this exact content height to its valid bottom offset.
+            ui.set_log_scroll_y((vm.row_count() * 30) as f32);
         }
     });
 }

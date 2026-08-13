@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — live activity-log tail
+
+- Activity entries now read chronologically from oldest to newest.
+- Opening the LOGS margin drawer jumps directly to the bottom, and new entries
+  keep the current processing stage and ETA visible during an active upscale.
+- Failed video runs now retain the final FFmpeg diagnostic and a partial
+  per-stage timing breakdown instead of reporting only a closed pipe.
+- Fixed copied audio that ends before the picture causing FFmpeg to close the
+  encoder pipe and discard the upscale near completion. Output length now
+  follows the generated video; longer audio is trimmed and shorter audio is
+  left short without truncating picture frames.
+
 ## Unreleased — readable model selector
 
 - Widened the right settings drawer from 348px to 480px so long model names

@@ -18,6 +18,46 @@ Last updated: 2026-08-13
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B59 — Short audio track terminated a video upscale near completion
+
+- **Where:** video encoder/mux command when source audio copy is enabled
+- **What:** FFmpeg was launched with `-shortest`. The reproduced source has
+  17.333 seconds of picture but only 16.579 seconds of audio, so FFmpeg stopped
+  accepting raw video at the audio endpoint with roughly 45 of 1,040 output
+  frames still to come.
+- **Impact:** the tested 2K/60 fps run spent about eight minutes processing,
+  then failed with a closed pipe and removed the partial output.
+- **Fix:** the encoder now uses the exact generated-frame duration. Longer
+  copied audio is trimmed to the picture; shorter audio no longer cuts off the
+  picture. Media probing also prefers the selected video-stream duration over
+  a potentially longer container/audio duration.
+- [x] B59 — prevent short copied audio from truncating generated video
+
+### B58 — Late encoder failure hid its cause and discarded timing
+
+- **Where:** full video upscale failure path and persistent activity log
+- **What:** when FFmpeg exited during frame delivery, Kraken returned only the
+  Windows broken-pipe message. The useful FFmpeg error and the stage timing
+  already collected during the run were discarded.
+- **Impact:** an eight-minute run could fail without saying why, and there was
+  no evidence showing which stage had consumed the time.
+- **Fix:** encoder/decoder failures now include the final non-empty FFmpeg
+  diagnostic lines. Non-cancellation failures also retain partial decode,
+  RIFE, model, temporal lock, finish, encode, and unaccounted timings.
+- [x] B58 — preserve process diagnostics and partial stage timing on failure
+
+### B57 — Activity log opened on old entries instead of current work
+
+- **Where:** left LOGS drawer
+- **What:** the in-memory log was stored newest-first, contrary to conventional
+  chronological log reading, and the drawer did not explicitly seek its live
+  edge when opened.
+- **Impact:** users monitoring an active upscale had to search or scroll before
+  they could see the current stage and ETA.
+- **Fix:** log rows are now appended chronologically. Opening LOGS seeks to the
+  bottom, and each new activity line keeps the live tail in view.
+- [x] B57 — LOGS opens and follows current activity
+
 ### B56 — Model names were unreadable in the narrow settings drawer
 
 - **Where:** ENHANCE drawer, Detail Model selector and its dropdown

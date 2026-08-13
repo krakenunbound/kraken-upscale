@@ -273,7 +273,7 @@ pub fn probe(path: &std::path::Path) -> Result<ClipInfo, String> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name,pix_fmt,field_order,sample_aspect_ratio,display_aspect_ratio",
+            "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,duration,codec_name,pix_fmt,field_order,sample_aspect_ratio,display_aspect_ratio",
             "-show_entries",
             "format=duration",
             "-of",
@@ -336,8 +336,15 @@ pub fn probe(path: &std::path::Path) -> Result<ClipInfo, String> {
         coded_height.saturating_add(1)
     };
 
-    let duration = field("duration")
-        .and_then(|v| v.parse::<f64>().ok())
+    // ffprobe prints the selected video stream before the container FORMAT
+    // section. Prefer that stream duration; the container duration can instead
+    // describe a longer audio track. Skip N/A values and retain the format
+    // duration as a fallback for containers that omit stream duration.
+    let duration = text
+        .lines()
+        .filter_map(|line| line.split_once('=').filter(|(key, _)| *key == "duration"))
+        .filter_map(|(_, value)| value.trim().parse::<f64>().ok())
+        .find(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(0.0);
 
     // nb_frames is absent or "N/A" in plenty of containers; derive it instead.
