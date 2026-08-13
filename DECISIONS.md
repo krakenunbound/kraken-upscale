@@ -288,19 +288,18 @@ than raw 4x output*. It is a real artifact-suppression lever, not just a resize.
 For a while the Scale control **did nothing** — the model ran at 4x and only the
 badge changed, so raw 4x output was being shown regardless of the setting.
 
-### Scale should have two modes (planned)
+### Scale has two modes (implemented)
 
-Currently scale is multiplier-only (`x2 / x3 / x4`). It should offer:
+The Output menu offers both:
 
-1. **By multiplier** — `x2`, `x3`, `x4`. What exists now.
+1. **By multiplier** — `x2`, `x3`, `x4`.
 2. **By target format** — HD (1280×720), Full HD (1920×1080), 2K (2560×1440),
    UHD/4K (3840×2160), and possibly DCI 4K (4096×2160).
 
-Target-format mode is cheap to implement because the pipeline **already
-resamples last**: the model runs at its native factor and the result is
-area-averaged to whatever size is asked for. Non-integer scale factors
-therefore cost nothing extra — `720×480 → 3840×2160` is the same code path as
-`x2`.
+Target-format mode uses the pipeline's existing resample-last design: the
+model runs at the smallest supported working factor, then the result is
+area-averaged to the exact aspect-preserving dimensions. Landscape sources
+target the named height; portrait sources target the named width.
 
 Useful reference points:
 
@@ -600,7 +599,7 @@ audio remux as a complete chain.
 | Dock panel slide-out | **Verified** — automated UI test confirms 30→410→30 animation |
 | Temporal lock (flow-guided stabilization) | **Complete** — flow, confidence gate, export and preview; default Lock value still to choose (§12) |
 | Source preprocessing front-end | Partial — profile-driven deinterlace/deblock active; IVTC/grain remain |
-| Scale by target format (HD/2K/4K) | Designed (§7), not built |
+| Scale by target format (HD/2K/4K) | **Complete** — named goals plus x2/x3/x4 (§7) |
 | Performance pass | 896px RTX 3090 profile and parallel post-processing landed; batching/TensorRT remain |
 | Export cancel button | **Complete** — stops the active batch and removes partial output |
 | Auto tile size checkbox | **Complete** — persisted and VRAM-aware |

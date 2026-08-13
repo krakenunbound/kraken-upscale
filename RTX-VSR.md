@@ -40,10 +40,10 @@ NVIDIA's runtime license.
 
 ## Controls
 
-- Scale: x2, x3, or x4.
+- Output goal: HD 720p, Full HD 1080p, 2K 1440p, 4K/UHD 2160p, x2, x3, or x4.
 - Quality: Low, Medium, High, or Ultra.
 - Ultra matches the supplied `RTX-VSR-PRO.json` workflow.
-- Output: lossless PNG at the exact requested dimensions.
+- Output: PNG, JPEG 95, or lossless WebP at the exact requested dimensions.
 
 For outputs whose longest edge is above 15,360px, Kraken uses a protected VSR
 intermediate and an antialiased final resize. Outputs above 16,384px are

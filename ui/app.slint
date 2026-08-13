@@ -110,7 +110,12 @@ export component MainWindow inherits Window {
     in property <string> models-dir: "";
     in property <int> models-count: 0;
     in property <string> export-summary: "mp4 · H.264 NVENC · CQ 19 · audio copy";
-    in-out property <int> scale-index: 0;
+    in-out property <int> resolution-index: 1;
+    in-out property <int> right-panel: 1; // 0 Input, 1 Enhance, 2 Motion, 3 Output
+    in-out property <int> video-format-index: 0;
+    in-out property <int> video-quality-index: 1;
+    in-out property <int> audio-index: 0;
+    in-out property <int> image-format-index: 0;
     in-out property <int> model-index: 0;
 
     in-out property <float> split: 0.5;
@@ -411,7 +416,7 @@ export component MainWindow inherits Window {
                                 Help {
                                     lines: 3;
                                     text: root.export-running
-                                        ? "Cancels the active export, stops its native model process, then clears Kraken's caches."
+                                        ? "Cancels the active upscale, stops its native model process, then clears Kraken's caches."
                                         : "Drops Kraken's idle model and interpolation caches. Memory used by other apps is unaffected.";
                                 }
 
@@ -449,6 +454,7 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+
                 }
 
                 // ══ Left column ══════════════════════════════════════════
@@ -1029,7 +1035,7 @@ export component MainWindow inherits Window {
                             }
 
                             Btn {
-                                text: "Add Task";
+                                text: "Add to Batch";
                                 width: 116px;
                                 primary: true;
                                 enabled: root.has-clip;
@@ -1066,9 +1072,9 @@ export component MainWindow inherits Window {
                             }
 
                             Btn {
-                                text: root.image-pipeline-index == 1 ? "Add Refine Task"
-                                    : root.image-pipeline-index == 2 ? "Add RTX Task"
-                                    : "Add Image Task";
+                                text: root.image-pipeline-index == 1 ? "Add Refine to Batch"
+                                    : root.image-pipeline-index == 2 ? "Add RTX to Batch"
+                                    : "Add Image to Batch";
                                 width: 138px;
                                 primary: true;
                                 enabled: root.has-clip
@@ -1150,7 +1156,7 @@ export component MainWindow inherits Window {
                                 spacing: 8px;
 
                                 SectionLabel {
-                                    text: "EXPORT QUEUE";
+                                    text: "UPSCALE BATCH";
                                     vertical-alignment: center;
                                 }
 
@@ -1178,8 +1184,8 @@ export component MainWindow inherits Window {
                                     width: 100%;
                                     height: 100%;
                                     text: root.mode-index == 0
-                                        ? "No active export tasks — click \"Add Task\" to queue one."
-                                        : "No active image tasks — click \"Add Image Task\" to queue one.";
+                                        ? "No batch items. Click Upscale to process the loaded video immediately, or Add to Batch."
+                                        : "No batch items. Click Upscale to process the loaded image immediately, or Add Image to Batch.";
                                     color: Pal.text-mute;
                                     font-size: 11.5px;
                                     horizontal-alignment: center;
@@ -1296,8 +1302,9 @@ export component MainWindow inherits Window {
 
                 // ══ Settings rail ════════════════════════════════════════
                 railpane := Rectangle {
-                    width: Pal.rail-w;
-                    background: Pal.panel;
+                    width: 30px + Pal.rail-w;
+                    background: Pal.bg;
+                    clip: true;
 
                     // Slint's ScrollView does not derive its viewport from the
                     // content, and a VerticalLayout given less height than it
@@ -1306,19 +1313,31 @@ export component MainWindow inherits Window {
                     // deliberately generous — overshooting costs a little dead
                     // scroll space, undershooting brings the overlap back.
                     property <length> content-h:
-                          140px
-                        + (root.mode-index == 0 ? 260px : 70px)
-                        + (root.mode-index == 0 && root.src-open ? 210px : 0px)
-                        + (root.det-open ? 470px : 0px)
-                        + (root.mode-index == 1 && root.det-open && root.image-pipeline-index == 1 ? 340px : 0px)
-                        + (root.mode-index == 1 && root.det-open && root.image-pipeline-index == 2 ? 150px : 0px)
-                        + (root.mode-index == 0 && root.stb-open ? 200px : 0px)
-                        + (root.mode-index == 0 && root.fi-open  ?  90px : 0px)
-                        + (root.col-open ?  60px : 0px);
+                          190px
+                        + (root.right-panel == 0 ? 330px : 0px)
+                        + (root.right-panel == 1 ? 620px : 0px)
+                        + (root.right-panel == 1 && root.mode-index == 1 && root.image-pipeline-index == 1 ? 360px : 0px)
+                        + (root.right-panel == 2 ? 610px : 0px)
+                        + (root.right-panel == 3 ? 430px : 0px);
 
-                    Rectangle { width: 1px; background: Pal.line; }
+                    Rectangle {
+                        x: 0;
+                        width: Pal.rail-w;
+                        height: 100%;
+                        background: Pal.panel;
+                    }
+
+                    Rectangle {
+                        x: 0;
+                        width: 1px;
+                        height: 100%;
+                        background: Pal.line;
+                    }
 
                     VerticalLayout {
+                        x: 0;
+                        width: Pal.rail-w;
+                        height: 100%;
                         spacing: 0;
 
                         ScrollView {
@@ -1403,13 +1422,13 @@ export component MainWindow inherits Window {
                                 // ── Source ──────────────────────────────
                                 SectionHeader {
                                     title: "Source";
-                                    visible: root.mode-index == 0;
+                                    visible: root.mode-index == 0 && root.right-panel == 0;
                                     gated: false;
                                     enabled: true;
                                     expanded <=> root.src-open;
                                 }
 
-                                if root.mode-index == 0 && root.src-open: VerticalLayout {
+                                if root.mode-index == 0 && root.right-panel == 0 && root.src-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1500,12 +1519,13 @@ export component MainWindow inherits Window {
                                 // a checkbox to switch it off is noise.
                                 SectionHeader {
                                     title: "Detail Model";
+                                    visible: root.right-panel == 1;
                                     gated: false;
                                     enabled: true;
                                     expanded <=> root.det-open;
                                 }
 
-                                if root.det-open: VerticalLayout {
+                                if root.right-panel == 1 && root.det-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1513,7 +1533,7 @@ export component MainWindow inherits Window {
 
                                     Help {
                                         lines: 2;
-                                        text: "The bundled GPU runtime is required for preview and export; missing GPU support is reported instead of silently rendering very slowly.";
+                                        text: "The bundled GPU runtime is required for preview and upscaling; missing GPU support is reported instead of silently rendering very slowly.";
                                     }
 
                                     if root.mode-index == 1: HorizontalLayout {
@@ -1570,34 +1590,6 @@ export component MainWindow inherits Window {
                                         Help {
                                             lines: 3;
                                             text: root.model-note;
-                                            horizontal-stretch: 1;
-                                        }
-                                    }
-
-                                    FieldRow {
-                                        text: "Scale";
-                                        accent: true;
-                                        items: ["x2", "x3", "x4"];
-                                        current <=> root.scale-index;
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    // Only present when the model's native
-                                    // scale exceeds the requested one, which
-                                    // costs real time for no extra output.
-                                    if root.scale-note != "": HorizontalLayout {
-                                        spacing: 7px;
-                                        Text {
-                                            text: "!";
-                                            color: Pal.ember;
-                                            font-size: 11px;
-                                            font-weight: 700;
-                                            width: 12px;
-                                        }
-                                        Help {
-                                            lines: 3;
-                                            text: root.scale-note;
-                                            color: Pal.ember;
                                             horizontal-stretch: 1;
                                         }
                                     }
@@ -1682,7 +1674,7 @@ export component MainWindow inherits Window {
                                         Help {
                                             lines: 3;
                                             text: root.generative-runtime-ready
-                                                ? "The faithful model runs first. A native FLUX image-to-image pass then refines overlapping tiles. The stage is intentionally export-only because it is much slower than the preview model."
+                                                ? "The faithful model runs first. A native FLUX image-to-image pass then refines overlapping tiles. The stage runs only during Upscale because it is much slower than the preview model."
                                                 : "Native generative runtime or a complete model package is missing. Add sd-server beside the app and a manifest under models/generative/.";
                                             color: root.generative-runtime-ready ? Pal.text-mute : Pal.ember;
                                         }
@@ -1759,14 +1751,14 @@ export component MainWindow inherits Window {
                                     title: root.model-is-video
                                         ? "Temporal consistency — built into model"
                                         : "Stability — temporal lock";
-                                    visible: root.mode-index == 0;
+                                    visible: root.mode-index == 0 && root.right-panel == 2;
                                     enabled <=> root.stability-on;
                                     interactive: !root.model-is-video;
                                     expanded <=> root.stb-open;
                                     toggled(v) => { root.settings-changed(); }
                                 }
 
-                                if root.mode-index == 0 && root.stb-open: VerticalLayout {
+                                if root.mode-index == 0 && root.right-panel == 2 && root.stb-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1816,7 +1808,7 @@ export component MainWindow inherits Window {
                                     Help {
                                         lines: 3;
                                         text: "The preview renders the preceding frame too so "
-                                            + "this can be judged before exporting — scrub off "
+                                            + "this can be judged before upscaling — scrub off "
                                             + "the first frame to see it, at roughly double the "
                                             + "preview time.";
                                         color: Pal.text-mute;
@@ -1830,14 +1822,14 @@ export component MainWindow inherits Window {
                                     title: root.interp-available ? "Frame Interpolation — RIFE"
                                         : "Frame Interpolation — model missing";
                                     gated: true;
-                                    visible: root.mode-index == 0;
+                                    visible: root.mode-index == 0 && root.right-panel == 2;
                                     enabled <=> root.interp-on;
                                     interactive: root.interp-available;
                                     expanded <=> root.fi-open;
                                     toggled(v) => { root.settings-changed(); }
                                 }
 
-                                if root.mode-index == 0 && root.fi-open: VerticalLayout {
+                                if root.mode-index == 0 && root.right-panel == 2 && root.fi-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1846,7 +1838,7 @@ export component MainWindow inherits Window {
                                     Help {
                                         lines: 3;
                                         text: root.interp-available
-                                            ? "RIFE synthesizes motion-aware frames between source frames. It runs before detail upscaling and increases export time with the chosen frame rate."
+                                            ? "RIFE synthesizes motion-aware frames between source frames. It runs before detail upscaling and increases processing time with the chosen frame rate."
                                             : "Add RIFE_fp32_timestep.onnx to models/interpolation and restart the app.";
                                     }
 
@@ -1865,12 +1857,13 @@ export component MainWindow inherits Window {
                                 // ── Color ───────────────────────────────
                                 col-hdr := SectionHeader {
                                     title: "Color";
+                                    visible: root.right-panel == 2;
                                     gated: false;
                                     enabled: true;
                                     expanded <=> root.col-open;
                                 }
 
-                                if root.col-open: VerticalLayout {
+                                if root.right-panel == 2 && root.col-open: VerticalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-bottom: 10px;
@@ -1882,6 +1875,104 @@ export component MainWindow inherits Window {
                                         checked <=> root.match-color;
                                         enabled: root.has-clip;
                                         toggled(v) => { root.settings-changed(); }
+                                    }
+                                }
+
+                                // ── Output ──────────────────────────────
+                                if root.right-panel == 3: VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-bottom: 10px;
+                                    spacing: 10px;
+
+                                    SectionLabel { text: "OUTPUT GOAL"; }
+
+                                    FieldRow {
+                                        text: "Resolution";
+                                        accent: true;
+                                        enabled: root.has-clip;
+                                        items: [
+                                            "HD · 720p",
+                                            "Full HD · 1080p",
+                                            "2K · 1440p",
+                                            "4K / UHD · 2160p",
+                                            "Multiplier · x2",
+                                            "Multiplier · x3",
+                                            "Multiplier · x4",
+                                        ];
+                                        current <=> root.resolution-index;
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    Help {
+                                        lines: 3;
+                                        text: "Named goals preserve the source aspect ratio automatically: landscape targets output height and portrait targets output width. x2/x3/x4 remain available for direct multiplication.";
+                                    }
+
+                                    if root.scale-note != "": HorizontalLayout {
+                                        spacing: 7px;
+                                        Text {
+                                            text: "!";
+                                            color: Pal.ember;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            width: 12px;
+                                        }
+                                        Help {
+                                            lines: 3;
+                                            text: root.scale-note;
+                                            color: Pal.ember;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+
+                                    Rectangle { height: 1px; background: Pal.line-soft; }
+                                    SectionLabel { text: root.mode-index == 0 ? "VIDEO FORMAT" : "IMAGE FORMAT"; }
+
+                                    FieldRow {
+                                        visible: root.mode-index == 0;
+                                        text: "Format";
+                                        items: [
+                                            "MP4 · H.264 NVENC",
+                                            "MP4 · H.265 / HEVC NVENC",
+                                            "MKV · H.264 NVENC",
+                                            "MKV · H.265 / HEVC NVENC",
+                                        ];
+                                        current <=> root.video-format-index;
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    FieldRow {
+                                        visible: root.mode-index == 0;
+                                        text: "Quality";
+                                        items: ["Best · CQ 15", "High · CQ 19", "Balanced · CQ 23"];
+                                        current <=> root.video-quality-index;
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    FieldRow {
+                                        visible: root.mode-index == 0;
+                                        text: "Audio";
+                                        items: ["Copy source audio", "No audio"];
+                                        current <=> root.audio-index;
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    FieldRow {
+                                        visible: root.mode-index == 1;
+                                        text: "Format";
+                                        items: ["PNG · lossless", "JPEG · quality 95", "WebP · lossless"];
+                                        current <=> root.image-format-index;
+                                        changed(i) => { root.settings-changed(); }
+                                    }
+
+                                    Help {
+                                        lines: 3;
+                                        text: root.mode-index == 0
+                                            ? "H.264 is the most compatible. H.265 is usually smaller at similar quality. MKV is resilient and accepts a wider range of copied audio streams."
+                                            : root.image-format-index == 1
+                                                ? "JPEG is smaller but lossy and cannot preserve transparency. PNG and lossless WebP preserve alpha when the source has it."
+                                                : "PNG and lossless WebP preserve full image quality and source transparency.";
                                     }
                                 }
 
@@ -1913,8 +2004,8 @@ export component MainWindow inherits Window {
 
                                     Text {
                                         text: root.mode-index == 0
-                                            ? "Export format (fixed)"
-                                            : "Image export (fixed)";
+                                            ? "Video upscale output"
+                                            : "Image upscale output";
                                         color: Pal.text;
                                         font-size: 12px;
                                         font-weight: 600;
@@ -1922,12 +2013,17 @@ export component MainWindow inherits Window {
 
                                     Mono {
                                         text: root.mode-index == 0
-                                            ? root.export-summary
-                                            : root.image-pipeline-index == 1
-                                                ? "png · native FLUX tile refine · lossless"
-                                                : root.image-pipeline-index == 2
-                                                    ? "png · native NVIDIA RTX VSR · lossless"
-                                                    : "png · lossless · full resolution";
+                                            ? (root.video-format-index == 0 ? "MP4 · H.264 NVENC"
+                                                : root.video-format-index == 1 ? "MP4 · H.265 NVENC"
+                                                : root.video-format-index == 2 ? "MKV · H.264 NVENC"
+                                                : "MKV · H.265 NVENC")
+                                                + (root.video-quality-index == 0 ? " · CQ 15"
+                                                    : root.video-quality-index == 1 ? " · CQ 19"
+                                                    : " · CQ 23")
+                                                + (root.audio-index == 0 ? " · audio copy" : " · no audio")
+                                            : (root.image-format-index == 0 ? "PNG · lossless"
+                                                : root.image-format-index == 1 ? "JPEG · quality 95"
+                                                : "WebP · lossless");
                                         color: Pal.text-mute;
                                     }
                                 }
@@ -1935,7 +2031,7 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: root.mode-index == 0 ? "LOCKED"
+                                        text: root.mode-index == 0 ? "CONFIGURABLE"
                                             : root.image-pipeline-index == 1 ? "GENERATIVE"
                                             : root.image-pipeline-index == 2 ? "RTX VSR"
                                             : "LOSSLESS";
@@ -1956,15 +2052,15 @@ export component MainWindow inherits Window {
                                 spacing: 10px;
 
                                 Btn {
-                                    text: "Export";
+                                    text: "Upscale";
                                     primary: true;
                                     horizontal-stretch: 1;
-                                    enabled: root.tasks.length > 0 && !root.export-running;
+                                    enabled: (root.tasks.length > 0 || root.has-clip) && !root.export-running;
                                     clicked => { root.export-current(); }
                                 }
 
                                 Btn {
-                                    text: root.export-running ? "Cancel Export" : "Batch Export";
+                                    text: root.export-running ? "Cancel Upscale" : "Batch Upscale";
                                     horizontal-stretch: 1;
                                     enabled: root.tasks.length > 0;
                                     clicked => {
@@ -1972,6 +2068,93 @@ export component MainWindow inherits Window {
                                         else { root.batch-export(); }
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // Always-visible right margin tabs. This mirrors the
+                    // LOGS / SYSTEM strip on the left. The selected category
+                    // changes while the bottom upscale controls stay pinned.
+                    Rectangle {
+                        x: Pal.rail-w;
+                        width: 30px;
+                        height: 100%;
+                        background: Pal.panel;
+
+                        Rectangle {
+                            x: 0;
+                            width: 1px;
+                            height: 100%;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 10px;
+                            letters: ["I", "N", "P", "U", "T"];
+                            active: root.right-panel == 0;
+                            clicked => {
+                                root.right-panel = 0;
+                                root.settings-changed();
+                            }
+                        }
+
+                        Rectangle {
+                            x: 7px;
+                            y: 96px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 104px;
+                            letters: ["E", "N", "H", "A", "N", "C", "E"];
+                            active: root.right-panel == 1;
+                            clicked => {
+                                root.right-panel = 1;
+                                root.settings-changed();
+                            }
+                        }
+
+                        Rectangle {
+                            x: 7px;
+                            y: 216px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                            visible: root.mode-index == 0;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 224px;
+                            letters: ["M", "O", "T", "I", "O", "N"];
+                            active: root.right-panel == 2;
+                            visible: root.mode-index == 0;
+                            clicked => {
+                                root.right-panel = 2;
+                                root.settings-changed();
+                            }
+                        }
+
+                        Rectangle {
+                            x: 7px;
+                            y: root.mode-index == 0 ? 323px : 216px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: root.mode-index == 0 ? 331px : 224px;
+                            letters: ["O", "U", "T", "P", "U", "T"];
+                            active: root.right-panel == 3;
+                            clicked => {
+                                root.right-panel = 3;
+                                root.settings-changed();
                             }
                         }
                     }

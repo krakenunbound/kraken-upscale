@@ -49,21 +49,12 @@ pub struct ExportSpec {
     /// no libx264/libx265 to fall back on.
     pub codec: String,
     pub cq: u32,
+    pub copy_audio: bool,
 }
 
 impl ExportSpec {
     pub fn output_size(&self) -> (u32, u32) {
-        let even = |n: u32| {
-            if n.is_multiple_of(2) {
-                n
-            } else {
-                n.saturating_add(1)
-            }
-        };
-        (
-            even(self.clip.width.saturating_mul(self.target_scale)),
-            even(self.clip.height.saturating_mul(self.target_scale)),
-        )
+        crate::resolution::dimensions(self.clip.width, self.clip.height, self.target_scale, true)
     }
 
     /// Source rate after the front-end. Inverse telecine returns 30 to 24, so
@@ -167,26 +158,31 @@ fn spawn_encoder(spec: &ExportSpec) -> Result<Child, String> {
         "-i",
         "pipe:0",
     ]);
-    // Input 1: the original, purely so audio can be copied across.
-    cmd.arg("-i").arg(&spec.clip.path);
+    if spec.copy_audio {
+        // Input 1: the original, purely so audio can be copied across.
+        cmd.arg("-i").arg(&spec.clip.path);
+        cmd.args([
+            "-map", "0:v:0",
+            // `?` keeps this optional — plenty of clips have no audio stream.
+            "-map", "1:a:0?", "-c:a", "copy",
+        ]);
+    } else {
+        cmd.args(["-map", "0:v:0", "-an"]);
+    }
     cmd.args([
-        "-map",
-        "0:v:0",
-        // `?` keeps this optional — plenty of clips have no audio stream.
-        "-map",
-        "1:a:0?",
-        "-c:a",
-        "copy",
         "-c:v",
         &spec.codec,
         "-cq",
         &spec.cq.to_string(),
         "-pix_fmt",
         "yuv420p",
-        "-movflags",
-        "+faststart",
-        "-shortest",
     ]);
+    if spec.out_path.extension().and_then(|ext| ext.to_str()) == Some("mp4") {
+        cmd.args(["-movflags", "+faststart"]);
+    }
+    if spec.copy_audio {
+        cmd.arg("-shortest");
+    }
     cmd.arg(&spec.out_path);
 
     cmd.stdin(Stdio::piped())
@@ -624,6 +620,7 @@ mod tests {
             out_path: PathBuf::from("output.mp4"),
             codec: "h264_nvenc".into(),
             cq: 19,
+            copy_audio: true,
         }
     }
 
@@ -701,6 +698,7 @@ mod tests {
                 out_path: out_path.clone(),
                 codec: "h264_nvenc".into(),
                 cq: 19,
+                copy_audio: true,
             };
             let wall = std::time::Instant::now();
             let stages = run(
@@ -783,6 +781,7 @@ mod tests {
             out_path: output.clone(),
             codec: "h264_nvenc".into(),
             cq: 19,
+            copy_audio: true,
         };
 
         let wall = std::time::Instant::now();
@@ -882,6 +881,7 @@ mod tests {
                 out_path: out_path.clone(),
                 codec: "h264_nvenc".into(),
                 cq: 19,
+                copy_audio: true,
             };
             let started = std::time::Instant::now();
             let stages = run(
@@ -1015,6 +1015,7 @@ mod tests {
                 out_path: out_path.clone(),
                 codec: "h264_nvenc".into(),
                 cq: 19,
+                copy_audio: true,
             };
             run(
                 &spec,
@@ -1098,6 +1099,7 @@ mod tests {
             out_path: output.clone(),
             codec: "h264_nvenc".into(),
             cq: 23,
+            copy_audio: true,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         run(
@@ -1173,6 +1175,7 @@ mod tests {
             out_path: output.clone(),
             codec: "h264_nvenc".into(),
             cq: 23,
+            copy_audio: true,
         };
         run(
             &spec,

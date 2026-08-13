@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — goal-based output and right-margin workflow
+
+- Added HD 720p, Full HD 1080p, 2K 1440p, and 4K/UHD 2160p output goals while
+  retaining x2, x3, and x4. Named goals preserve aspect ratio automatically:
+  landscape sources target output height and portrait sources target width.
+- Replaced the long right rail's horizontal tab row with stacked INPUT,
+  ENHANCE, MOTION, and OUTPUT tabs on the app's far-right margin, mirroring the
+  visual language of LOGS / SYSTEM. Upscale controls stay pinned at the bottom.
+- A loaded single source can now be processed directly with **Upscale**; **Add
+  to Batch** remains available for deliberate batching. Export / Batch Export
+  wording is now Upscale / Batch Upscale throughout the visible workflow.
+- Added selectable MP4 or MKV, H.264 or H.265 NVENC, CQ 15/19/23, source-audio
+  copy or no audio, and PNG/JPEG 95/lossless WebP still-image output.
+- Exact target sizing is shared by preview, conventional image, RTX VSR,
+  multi-frame video, and final encoding paths. Invalid downscales and targets
+  requiring more than 4x reconstruction are explained instead of attempted.
+- Added focused resolution and output-writer regression coverage.
+- Built and visually verified both easy-launch GUI copies (43,164,672 bytes;
+  SHA-256 `DB32E2C38204680BC633CD2C17A7168EF33AE4E264862159FA3B00F11750F9DF`).
+
 ## Unreleased — step-by-step activity logging
 
 - Replaced opaque preview/export messages with named pipeline stages:

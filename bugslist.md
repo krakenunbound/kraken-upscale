@@ -8,15 +8,41 @@ such as IVTC and grain preservation stays in DECISIONS / NEXT-SESSION unless UI
 copy claims it is already active.
 
 **Method:** full pass over `src/*.rs` and the export/preview control surface in
-`ui/app.slint`. No fixes applied in this pass — findings only.
+`ui/app.slint`, followed by regression tests and release-app UI verification.
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 
 ---
 
 > **Status 2026-08-07:** every finding below is closed. B33 and B35–B42 were
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
+
+### B52 — Output workflow exposed implementation details instead of user goals
+
+- **Where:** right-side settings, resolution selection, task creation, and
+  video/image output writers
+- **What:** the UI only offered x2/x3/x4, kept every setting in one long rail,
+  required an unnecessary Add Task step for one file, called the action
+  Export, and locked output to one format.
+- **Impact:** common 720p/1080p/1440p/2160p targets required mental arithmetic;
+  the most common one-file workflow had an extra step; and codec, container,
+  audio, and still-image format could not be selected.
+- **Fix:** added aspect-preserving named goals alongside x2/x3/x4; split the
+  settings into INPUT / ENHANCE / MOTION / OUTPUT vertical tabs on the app's
+  far-right margin; pinned Upscale / Batch Upscale at the bottom; made Upscale
+  automatically capture a loaded unqueued source; and added MP4/MKV,
+  H.264/H.265 NVENC, CQ 15/19/23, audio copy/none, and PNG/JPEG/WebP choices.
+  Named goals target output height for landscape and output width for portrait,
+  with even video geometry and an exact aspect-preserving final resize.
+- **Verification:** resolution math has portrait, landscape, multiplier,
+  downscale-rejection, and >4x-rejection coverage. JPEG and lossless WebP are
+  written and probed in the test suite. The release UI was visually checked
+  with the right-margin menu on the extreme right and all seven resolution
+  choices present. A clean single-image release run with an empty batch turned
+  one click on Upscale into a completed 256×256 → 512×512 CUDA task without
+  first using Add to Batch.
+- [x] B52 — goal-based sizing, margin menus, direct Upscale, and formats
 
 ### B51 — Activity log described progress but not the pipeline
 
@@ -418,8 +444,6 @@ The reasoning is also recorded as a comment at the lock site so it is not
 |------|--------|
 | Preserve grain control | Explicitly labelled planned and `enabled: false` |
 | IVTC / telecine | Designed; not implemented — do not treat as a silent defect unless UI claims it runs |
-| Export codec/CQ UI | Footer is labelled fixed / LOCKED; values stay `h264_nvenc` / CQ 19 |
-| Scale by target format (HD/4K) | Designed in DECISIONS §7 |
 | SPAN / Compact / RealPLKSR `.pth` | RRDBNet only; unsupported topologies should error |
 | LGPL ffmpeg → NVENC only, no libx264 | By design |
 | AV1 NVENC on Ampere (3090) | Hardware limit, documented |

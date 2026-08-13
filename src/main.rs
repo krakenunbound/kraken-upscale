@@ -18,6 +18,7 @@ mod image_mode;
 mod interpolate;
 mod media;
 mod pth;
+mod resolution;
 mod rtx_vsr;
 mod settings;
 mod stages;
@@ -28,7 +29,6 @@ mod video;
 slint::include_modules!();
 
 /// Upscale factors offered by the Scale dropdown.
-const SCALES: [u32; 3] = [2, 3, 4];
 const GENERATIVE_STEPS: [u32; 4] = [8, 15, 20, 28];
 const GENERATIVE_TILES: [u32; 3] = [512, 768, 1024];
 
@@ -107,10 +107,10 @@ enum ExportCommand {
 impl TaskSpec {
     fn kind(&self) -> &'static str {
         match self {
-            Self::Video(_) => "VIDEO EXPORT",
-            Self::Image(_) => "IMAGE EXPORT",
-            Self::Generative(_) => "GENERATIVE EXPORT",
-            Self::RtxImage(_) => "RTX VSR EXPORT",
+            Self::Video(_) => "VIDEO UPSCALE",
+            Self::Image(_) => "IMAGE UPSCALE",
+            Self::Generative(_) => "GENERATIVE UPSCALE",
+            Self::RtxImage(_) => "RTX VSR UPSCALE",
         }
     }
 
@@ -161,7 +161,36 @@ fn log_step(
 }
 
 fn on_off(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
+    if value {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn video_output_options(index: i32) -> (&'static str, &'static str, &'static str) {
+    match index {
+        1 => ("hevc_nvenc", "mp4", "MP4 · H.265/HEVC NVENC"),
+        2 => ("h264_nvenc", "mkv", "MKV · H.264 NVENC"),
+        3 => ("hevc_nvenc", "mkv", "MKV · H.265/HEVC NVENC"),
+        _ => ("h264_nvenc", "mp4", "MP4 · H.264 NVENC"),
+    }
+}
+
+fn video_quality(index: i32) -> u32 {
+    match index {
+        0 => 15,
+        2 => 23,
+        _ => 19,
+    }
+}
+
+fn image_output_options(index: i32) -> (&'static str, &'static str) {
+    match index {
+        1 => ("jpg", "JPEG · quality 95"),
+        2 => ("webp", "WebP · lossless"),
+        _ => ("png", "PNG · lossless"),
+    }
 }
 
 fn source_treatment_description(
@@ -255,7 +284,7 @@ fn main() -> Result<(), slint::PlatformError> {
         Some(dir) => log(&logger, format!("CUDA runtime: {}", dir.display())),
         None => log(
             &logger,
-            "GPU runtime missing — preview and export are paused to avoid unusably slow CPU processing",
+            "GPU runtime missing — preview and upscaling are paused to avoid unusably slow CPU processing",
         ),
     }
 
@@ -345,13 +374,11 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     let rtx_vsr_ready = rtx_vsr::available();
     ui.set_rtx_vsr_ready(rtx_vsr_ready);
-    ui.set_image_pipeline_index(
-        if saved.image_pipeline_index == 2 && !rtx_vsr_ready {
-            0
-        } else {
-            saved.image_pipeline_index.clamp(0, 2)
-        },
-    );
+    ui.set_image_pipeline_index(if saved.image_pipeline_index == 2 && !rtx_vsr_ready {
+        0
+    } else {
+        saved.image_pipeline_index.clamp(0, 2)
+    });
     ui.set_rtx_vsr_quality_index(saved.rtx_vsr_quality_index.clamp(0, 3));
     ui.set_generative_prompt(saved.generative_prompt.clone().into());
     ui.set_generative_denoise(saved.generative_denoise.clamp(0.05, 0.40));
@@ -408,7 +435,12 @@ fn main() -> Result<(), slint::PlatformError> {
         saved.image_model.clone(),
     ]));
     let current_mode = Rc::new(Cell::new(initial_mode));
-    ui.set_scale_index(saved.scale_index);
+    ui.set_resolution_index(saved.resolution_index.clamp(0, 6));
+    ui.set_right_panel(saved.right_panel.clamp(0, 3));
+    ui.set_video_format_index(saved.video_format_index.clamp(0, 3));
+    ui.set_video_quality_index(saved.video_quality_index.clamp(0, 2));
+    ui.set_audio_index(saved.audio_index.clamp(0, 1));
+    ui.set_image_format_index(saved.image_format_index.clamp(0, 2));
     ui.set_strength(saved.strength);
     ui.set_detail_limit(saved.detail_limit);
     ui.set_fp16(saved.fp16);
@@ -479,12 +511,39 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_model_note(upscale::guidance(&model.name).into());
             ui.set_model_is_video(model.is_video());
             ui.set_model_video_tuned(model.video_tuned);
-            let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
+            let target_scale = resolution::from_index(ui.get_resolution_index());
+            let source_size = if ui.get_mode_index() == 1 {
+                still
+                    .borrow()
+                    .as_ref()
+                    .map(|info| (info.width, info.height, false))
+            } else {
+                clip.borrow()
+                    .as_ref()
+                    .map(|info| (info.width, info.height, true))
+            };
+            let Some((source_width, source_height, even)) = source_size else {
+                return;
+            };
+            let (output_width, output_height) =
+                resolution::dimensions(source_width, source_height, target_scale, even);
+            let working_scale =
+                match resolution::working_scale(source_width, source_height, target_scale, even) {
+                    Ok(scale) => scale,
+                    Err(error) => {
+                        ui.set_scale_note(error.clone().into());
+                        ui.set_out_badge(
+                            format!("{} × {} · unavailable", output_width, output_height).into(),
+                        );
+                        ui.set_preview_status(error.into());
+                        return;
+                    }
+                };
             ui.set_scale_note(
                 if ui.get_mode_index() == 1 && ui.get_image_pipeline_index() == 2 {
                     "".into()
                 } else {
-                    upscale::scale_advice(&model, target_scale, &active_models.borrow())
+                    upscale::scale_advice(&model, working_scale, &active_models.borrow())
                         .unwrap_or_default()
                         .into()
                 },
@@ -497,12 +556,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_out_badge(
                     format!(
                         "{} × {} · {}",
-                        info.width * target_scale,
-                        info.height * target_scale,
+                        output_width,
+                        output_height,
                         if ui.get_image_pipeline_index() == 2 {
                             format!(
                                 "RTX VSR {}",
-                                rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index()).label()
+                                rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index())
+                                    .label()
                             )
                         } else {
                             model.name.clone()
@@ -521,7 +581,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let generation = preview_generation.fetch_add(1, Ordering::Relaxed) + 1;
                 if ui.get_export_running() {
                     ui.set_preview_status(
-                        "image loaded · preview deferred while export is running".into(),
+                        "image loaded · preview deferred while an upscale is running".into(),
                     );
                     return;
                 }
@@ -539,9 +599,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     } else {
                         SAFE_TILE
                     },
-                    rtx_quality: (ui.get_image_pipeline_index() == 2).then(|| {
-                        rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index())
-                    }),
+                    rtx_quality: (ui.get_image_pipeline_index() == 2)
+                        .then(|| rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index())),
                 });
                 return;
             }
@@ -570,8 +629,8 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_out_badge(
                 format!(
                     "{} × {} · {}{}",
-                    info.width * target_scale,
-                    info.height * target_scale,
+                    output_width,
+                    output_height,
                     model.name,
                     interpolation_fps
                         .map(|fps| format!(" · {fps} fps RIFE"))
@@ -587,11 +646,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
             if ui.get_export_running() {
                 ui.set_preview_status(
-                    "video loaded · preview deferred while export is running".into(),
+                    "video loaded · preview deferred while an upscale is running".into(),
                 );
                 log(
                     &ui.as_weak(),
-                    "preview deferred: active export keeps exclusive use of the GPU",
+                    "preview deferred: active upscale keeps exclusive use of the GPU",
                 );
                 return;
             }
@@ -790,6 +849,9 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_mode_changed(move |requested_mode| {
             let Some(ui) = handle.upgrade() else { return };
             let next_mode = requested_mode.clamp(0, 1);
+            if next_mode == 1 && ui.get_right_panel() == 2 {
+                ui.set_right_panel(1);
+            }
             let previous_mode = current_mode.replace(next_mode);
             if let Some(model) = active_models
                 .borrow()
@@ -904,7 +966,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         cancel.store(true, Ordering::Relaxed);
                     }
                 }
-                ui.set_preview_status("cancelling export and releasing GPU memory…".into());
+                ui.set_preview_status("cancelling upscale and releasing GPU memory…".into());
             } else {
                 ui.set_preview_status("releasing Kraken GPU caches…".into());
             }
@@ -966,7 +1028,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(vm) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
                     vm.clear();
                 }
-                log(&ui.as_weak(), "export queue cleared");
+                log(&ui.as_weak(), "upscale batch cleared");
             }
         });
     }
@@ -987,7 +1049,7 @@ fn main() -> Result<(), slint::PlatformError> {
             else {
                 return;
             };
-            let target_scale = SCALES[(ui.get_scale_index().max(0) as usize).min(2)];
+            let target_scale = resolution::from_index(ui.get_resolution_index());
             let strength = ui.get_strength();
             let detail_limit = ui.get_detail_limit();
 
@@ -995,6 +1057,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some(info) = still.borrow().clone() else {
                     return;
                 };
+                if let Err(error) = resolution::working_scale(
+                    info.width,
+                    info.height,
+                    target_scale,
+                    false,
+                ) {
+                    ui.set_preview_status(error.into());
+                    return;
+                }
+                let (image_extension, image_format_label) =
+                    image_output_options(ui.get_image_format_index());
+                let goal_label = resolution::label(target_scale);
                 let stem = info
                     .path
                     .file_stem()
@@ -1011,8 +1085,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     let quality =
                         rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index());
                     let candidate = info.path.with_file_name(format!(
-                        "{stem}_{target_scale}x_RTX-VSR-{}.png",
-                        quality.label()
+                        "{stem}_{goal_label}_RTX-VSR-{}.{}",
+                        quality.label(),
+                        image_extension
                     ));
                     let out_path = unique_output_path(&candidate, &queue.borrow());
                     let spec = rtx_vsr::ExportSpec {
@@ -1027,8 +1102,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         rows.push(TaskRow {
                             name: info.file_name().into(),
                             detail: format!(
-                                "{width}×{height} · NVIDIA RTX VSR {} · {target_scale}x · lossless PNG",
-                                quality.label()
+                                "{width}×{height} · NVIDIA RTX VSR {} · {}",
+                                quality.label(), image_format_label
                             )
                             .into(),
                             status: "queued".into(),
@@ -1061,9 +1136,9 @@ fn main() -> Result<(), slint::PlatformError> {
                         format!("{}_Gen-{}", model.name, file_label(&package.name))
                     })
                     .unwrap_or_else(|| model.name.clone());
-                let candidate = info
-                    .path
-                    .with_file_name(format!("{stem}_{target_scale}x_{suffix}.png"));
+                let candidate = info.path.with_file_name(format!(
+                    "{stem}_{goal_label}_{suffix}.{image_extension}"
+                ));
                 let out_path = unique_output_path(&candidate, &queue.borrow());
                 let spec = image_mode::ExportSpec {
                     image: info.clone(),
@@ -1095,8 +1170,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         .into()
                     } else {
                         format!(
-                            "{width}×{height} · {} · lossless PNG · str {strength:.2} · lim {detail_limit:.2}",
-                            model.name
+                            "{width}×{height} · {} · {} · str {strength:.2} · lim {detail_limit:.2}",
+                            model.name, image_format_label
                         )
                         .into()
                     },
@@ -1134,6 +1209,12 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(info) = clip.borrow().clone() else {
                 return;
             };
+            if let Err(error) =
+                resolution::working_scale(info.width, info.height, target_scale, true)
+            {
+                ui.set_preview_status(error.into());
+                return;
+            }
             let interpolation_fps = ui
                 .get_interp_on()
                 .then(|| interpolate::target_fps(ui.get_interp_index()));
@@ -1159,8 +1240,11 @@ fn main() -> Result<(), slint::PlatformError> {
             let fps_suffix = interpolation_fps
                 .map(|fps| format!("_{fps}fps"))
                 .unwrap_or_default();
+            let (codec, extension, _) = video_output_options(ui.get_video_format_index());
+            let cq = video_quality(ui.get_video_quality_index());
             let candidate = info.path.with_file_name(format!(
-                "{stem}_{target_scale}x_{}{fps_suffix}.mp4",
+                "{stem}_{}_{}{fps_suffix}.{extension}",
+                resolution::label(target_scale),
                 model.name
             ));
             let out_path = unique_output_path(&candidate, &queue.borrow());
@@ -1188,8 +1272,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     SAFE_TILE
                 },
                 out_path: out_path.clone(),
-                codec: "h264_nvenc".into(),
-                cq: 19,
+                codec: codec.into(),
+                cq,
+                copy_audio: ui.get_audio_index() == 0,
             };
 
             let (ow, oh) = spec.output_size();
@@ -1223,24 +1308,41 @@ fn main() -> Result<(), slint::PlatformError> {
         let tx = export_tx.clone();
         ui.on_export_current(move || {
             let ui = handle.unwrap();
-            let q = queue.borrow();
-            let next = ui
-                .get_tasks()
-                .as_any()
-                .downcast_ref::<VecModel<TaskRow>>()
-                .and_then(|vm| {
-                    (0..vm.row_count()).find(|&idx| {
-                        vm.row_data(idx)
-                            .map(|row| !row.done && !row.running)
-                            .unwrap_or(false)
+            let find_next = || {
+                ui.get_tasks()
+                    .as_any()
+                    .downcast_ref::<VecModel<TaskRow>>()
+                    .and_then(|vm| {
+                        (0..vm.row_count()).find(|&idx| {
+                            vm.row_data(idx)
+                                .map(|row| !row.done && !row.running)
+                                .unwrap_or(false)
+                        })
                     })
-                });
-            match next.and_then(|idx| q.get(idx).cloned().map(|spec| (idx, spec))) {
+            };
+            let mut next = find_next();
+            // A single loaded source is already an implied task. The explicit
+            // Add Task button remains useful for building/comparing a batch,
+            // but is no longer a prerequisite for the common one-file case.
+            if next.is_none() && queue.borrow().is_empty() && ui.get_has_clip() {
+                log(
+                    &ui.as_weak(),
+                    "UPSCALE · no queued task; creating one from the current source and settings",
+                );
+                ui.invoke_add_task();
+                next = find_next();
+            }
+            let selected =
+                next.and_then(|idx| queue.borrow().get(idx).cloned().map(|spec| (idx, spec)));
+            match selected {
                 Some((idx, spec)) => {
                     mark_scheduled(&ui, idx);
                     let _ = tx.send(ExportCommand::Run(vec![(idx, spec)]));
                 }
-                None => ui.set_preview_status("no unfinished task is available".into()),
+                None => ui.set_preview_status(
+                    "no unfinished upscale is available; load a source or clear completed tasks"
+                        .into(),
+                ),
             }
         });
     }
@@ -1382,14 +1484,14 @@ fn spawn_preview_worker(
             log(
                 &handle,
                 format!(
-                    "VIDEO PREVIEW · START — {} at {:.3}s · source {}×{} {} {} · requested {}x",
+                    "VIDEO PREVIEW · START — {} at {:.3}s · source {}×{} {} {} · goal {}",
                     job.clip.file_name(),
                     job.at_secs,
                     job.clip.width,
                     job.clip.height,
                     job.clip.codec,
                     job.clip.pix_fmt,
-                    job.target_scale,
+                    resolution::display_label(job.target_scale),
                 ),
             );
             log_step(
@@ -1432,7 +1534,6 @@ fn spawn_preview_worker(
                         .unwrap_or_default()
                 ),
             );
-
             if current_generation.load(Ordering::Relaxed) == job.generation {
                 let h = handle.clone();
                 let source_width = source.width;
@@ -1451,14 +1552,16 @@ fn spawn_preview_worker(
 
             let listed_scale = job.model.scale.max(1);
             let preview_tile = job.tile.min(4096 / listed_scale).max(64);
+            let (preview_output_width, preview_output_height) =
+                resolution::dimensions(source.width, source.height, job.target_scale, true);
             log_step(
                 &handle,
                 "VIDEO PREVIEW",
                 2,
                 format!(
                     "Plan output {}×{} · model {} ({}x native, {}-frame window) · requested tile ceiling {}px · {}px overlap; exact effective grid follows after model validation",
-                    source.width.saturating_mul(job.target_scale),
-                    source.height.saturating_mul(job.target_scale),
+                    preview_output_width,
+                    preview_output_height,
                     job.model.name,
                     listed_scale,
                     job.model.temporal_frames.max(1),
@@ -1608,11 +1711,7 @@ fn spawn_preview_worker(
                 };
                 let limited = upscale::clamp_deviation(&colored, src, job.detail_limit * 255.0);
                 let blended = upscale::blend_toward_source(&limited, src, job.strength);
-                upscale::resample(
-                    &blended,
-                    src.width * job.target_scale,
-                    src.height * job.target_scale,
-                )
+                upscale::resample(&blended, preview_output_width, preview_output_height)
             };
 
             let preview_sources = if up.window() == 1 {
@@ -1686,8 +1785,8 @@ fn spawn_preview_worker(
                             on_off(job.match_color),
                             job.detail_limit,
                             job.strength,
-                            source.width.saturating_mul(job.target_scale),
-                            source.height.saturating_mul(job.target_scale)
+                            preview_output_width,
+                            preview_output_height
                         ),
                     );
                     let mut final_frame = finish(out, &source);
@@ -1777,10 +1876,10 @@ fn spawn_preview_worker(
                     };
 
                     let note = format!(
-                        "{} · {}x native → {}x{} · {} · {:.1}s on {}",
+                        "{} · {}x native → {}{} · {} · {:.1}s on {}",
                         job.model.name,
                         up.scale(),
-                        job.target_scale,
+                        resolution::display_label(job.target_scale),
                         extra,
                         if job.fp16 { "fp16" } else { "fp32" },
                         secs,
@@ -1796,7 +1895,10 @@ fn spawn_preview_worker(
                     );
                 }
                 Err(e) => {
-                    log(&handle, format!("VIDEO PREVIEW · FAILED during CUDA inference — {e}"));
+                    log(
+                        &handle,
+                        format!("VIDEO PREVIEW · FAILED during CUDA inference — {e}"),
+                    );
                     report_current(
                         &handle,
                         &current_generation,
@@ -1898,14 +2000,14 @@ fn spawn_image_preview_worker(
             log(
                 &handle,
                 format!(
-                    "IMAGE PREVIEW · START — {} · {}×{} {} {} · alpha {} · requested {}x",
+                    "IMAGE PREVIEW · START — {} · {}×{} {} {} · alpha {} · goal {}",
                     job.image.file_name(),
                     job.image.width,
                     job.image.height,
                     job.image.codec,
                     job.image.pix_fmt,
                     on_off(job.image.has_alpha),
-                    job.target_scale
+                    resolution::display_label(job.target_scale)
                 ),
             );
             log_step(&handle, "IMAGE PREVIEW", 1, "Decode source image to RGB");
@@ -1933,6 +2035,8 @@ fn spawn_image_preview_worker(
                     decode_started.elapsed().as_secs_f32()
                 ),
             );
+            let (preview_output_width, preview_output_height) =
+                resolution::dimensions(source.width, source.height, job.target_scale, false);
 
             if current_generation.load(Ordering::Relaxed) == job.generation {
                 let h = handle.clone();
@@ -1969,12 +2073,12 @@ fn spawn_image_preview_worker(
                     "IMAGE PREVIEW",
                     3,
                     format!(
-                        "Allocate CUDA buffers and run VSR · {}×{} → {}×{} · exact {}x output",
+                        "Allocate CUDA buffers and run VSR · {}×{} → exact {}×{} · goal {}",
                         source.width,
                         source.height,
-                        source.width.saturating_mul(job.target_scale),
-                        source.height.saturating_mul(job.target_scale),
-                        job.target_scale
+                        preview_output_width,
+                        preview_output_height,
+                        resolution::display_label(job.target_scale)
                     ),
                 );
                 let h = handle.clone();
@@ -1983,7 +2087,24 @@ fn spawn_image_preview_worker(
                         ui.set_preview_progress(0.15);
                     }
                 });
-                let result = rtx_vsr::upscale_frame(&source, job.target_scale, quality);
+                let result =
+                    resolution::working_scale(source.width, source.height, job.target_scale, false)
+                        .and_then(|working_scale| {
+                            rtx_vsr::upscale_frame(&source, working_scale, quality)
+                        })
+                        .map(|output| {
+                            if (output.width, output.height)
+                                == (preview_output_width, preview_output_height)
+                            {
+                                output
+                            } else {
+                                upscale::resample(
+                                    &output,
+                                    preview_output_width,
+                                    preview_output_height,
+                                )
+                            }
+                        });
                 match result {
                     Ok(output) => {
                         log_step(
@@ -1997,9 +2118,9 @@ fn spawn_image_preview_worker(
                         );
                         let elapsed = started.elapsed().as_secs_f32();
                         let note = format!(
-                            "NVIDIA RTX VSR {} · {}x · {:.1}s on CUDA",
+                            "NVIDIA RTX VSR {} · {} · {:.1}s on CUDA",
                             quality.label(),
-                            job.target_scale,
+                            resolution::display_label(job.target_scale),
                             elapsed
                         );
                         log(&handle, format!("IMAGE PREVIEW · COMPLETE — {note}"));
@@ -2153,8 +2274,8 @@ fn spawn_image_preview_worker(
                             on_off(job.match_color),
                             job.detail_limit,
                             job.strength,
-                            source.width.saturating_mul(job.target_scale),
-                            source.height.saturating_mul(job.target_scale)
+                            preview_output_width,
+                            preview_output_height
                         ),
                     );
                     let spec = image_mode::ExportSpec {
@@ -2170,10 +2291,10 @@ fn spawn_image_preview_worker(
                     };
                     let final_image = image_mode::finish(&spec, model_output, &source);
                     let note = format!(
-                        "{} · {}x native → {}x · lossless PNG · {:.1}s on {}",
+                        "{} · {}x native · goal {} · {:.1}s on {}",
                         job.model.name,
                         engine.scale(),
-                        job.target_scale,
+                        resolution::display_label(job.target_scale),
                         started.elapsed().as_secs_f32(),
                         engine.provider()
                     );
@@ -2246,7 +2367,7 @@ fn spawn_exporter(
             set_export_running(&handle, true);
             log(
                 &handle,
-                format!("EXPORT BATCH · START — {} queued task(s)", batch.len()),
+                format!("UPSCALE BATCH · START — {} queued task(s)", batch.len()),
             );
 
             for (idx, spec) in batch {
@@ -2399,7 +2520,7 @@ fn spawn_exporter(
 
                 let plan = match &spec {
                     TaskSpec::Video(video) => format!(
-                        "Prepare decode → model → finish → encode pipeline · {}×{} {} {} at {:.3} fps → {}×{} · {} output frames at {} fps · RIFE {} · color match {} · stability {} (strength {:.2}, cut {:.2}) · tile {}px/overlap {}px · {} CQ {} · audio copy",
+                        "Prepare decode → model → finish → encode pipeline · {}×{} {} {} at {:.3} fps → {}×{} · {} output frames at {} fps · RIFE {} · color match {} · stability {} (strength {:.2}, cut {:.2}) · tile {}px/overlap {}px · {} CQ {} · audio {}",
                         video.clip.width,
                         video.clip.height,
                         video.clip.codec,
@@ -2421,9 +2542,11 @@ fn spawn_exporter(
                         OVERLAP,
                         video.codec,
                         video.cq,
+                        if video.copy_audio { "copy" } else { "none" },
                     ),
                     TaskSpec::Image(image) => format!(
-                        "Prepare decode → tiled model → finish → PNG pipeline · {}×{} {} {} → {}×{} · model {} · tile {}px/overlap {}px · color match {} · detail limit {:.2} · source blend {:.2} · alpha restore {}",
+                        "Prepare decode → tiled model → finish → {} pipeline · {}×{} {} {} → {}×{} · model {} · tile {}px/overlap {}px · color match {} · detail limit {:.2} · source blend {:.2} · alpha restore {}",
+                        image.out_path.extension().and_then(|ext| ext.to_str()).unwrap_or("image").to_ascii_uppercase(),
                         image.image.width,
                         image.image.height,
                         image.image.codec,
@@ -2439,7 +2562,8 @@ fn spawn_exporter(
                         on_off(image.image.has_alpha),
                     ),
                     TaskSpec::Generative(image) => format!(
-                        "Prepare faithful pre-upscale → native generative tile refine → blend → PNG pipeline · {}×{} → {}×{} · {} then {} · denoise {:.2} · {} steps · {}px refine tiles · quality finish {}",
+                        "Prepare faithful pre-upscale → native generative tile refine → blend → {} pipeline · {}×{} → {}×{} · {} then {} · denoise {:.2} · {} steps · {}px refine tiles · quality finish {}",
+                        image.out_path().extension().and_then(|ext| ext.to_str()).unwrap_or("image").to_ascii_uppercase(),
                         image.conventional.image.width,
                         image.conventional.image.height,
                         image.output_size().0,
@@ -2452,7 +2576,8 @@ fn spawn_exporter(
                         on_off(image.quality_finish),
                     ),
                     TaskSpec::RtxImage(image) => format!(
-                        "Prepare decode → native NVIDIA VSR → RGB integrity check → PNG pipeline · {}×{} {} {} → {}×{} · quality {} · runtime {}",
+                        "Prepare decode → native NVIDIA VSR → RGB integrity check → {} pipeline · {}×{} {} {} → {}×{} · quality {} · runtime {}",
+                        image.out_path.extension().and_then(|ext| ext.to_str()).unwrap_or("image").to_ascii_uppercase(),
                         image.image.width,
                         image.image.height,
                         image.image.codec,
@@ -2516,8 +2641,9 @@ fn spawn_exporter(
                         let detail = if progress_is_rtx {
                             match done {
                                 1 => "source image decoded to RGB".to_string(),
-                                2 => "native RTX VSR processing and integrity check complete".to_string(),
-                                _ => "lossless PNG written".to_string(),
+                                2 => "native RTX VSR processing and integrity check complete"
+                                    .to_string(),
+                                _ => "output image written".to_string(),
                             }
                         } else if progress_is_video {
                             format!("processed frame {done}/{total}")
@@ -2601,7 +2727,8 @@ fn spawn_exporter(
                             } else {
                                 done.saturating_mul(4).saturating_div(total).min(4)
                             };
-                            if done > 0 && (done == 1 || done >= total || bucket > pre_last_bucket) {
+                            if done > 0 && (done == 1 || done >= total || bucket > pre_last_bucket)
+                            {
                                 pre_last_bucket = bucket;
                                 log(
                                     &progress_handle,
@@ -2743,7 +2870,10 @@ fn spawn_exporter(
                 *slot = None;
             }
             set_export_running(&handle, false);
-            log(&handle, "EXPORT BATCH · COMPLETE — all scheduled tasks finished");
+            log(
+                &handle,
+                "UPSCALE BATCH · COMPLETE — all scheduled tasks finished",
+            );
         }
     });
 
@@ -3039,7 +3169,8 @@ fn collect_settings(
             as i32,
         generative_tile_index: ui.get_generative_tile_index(),
         generative_quality_finish: ui.get_generative_quality_finish(),
-        scale_index: ui.get_scale_index(),
+        scale_index: 0,
+        resolution_index: ui.get_resolution_index(),
         strength: ui.get_strength(),
         detail_limit: ui.get_detail_limit(),
         fp16: ui.get_fp16(),
@@ -3056,8 +3187,13 @@ fn collect_settings(
         interp_index: ui.get_interp_index(),
         dock_panel: ui.get_dock_panel(),
         view_mode: ui.get_view_mode(),
-        codec: "h264_nvenc".into(),
-        cq: 19,
+        right_panel: ui.get_right_panel(),
+        video_format_index: ui.get_video_format_index(),
+        video_quality_index: ui.get_video_quality_index(),
+        audio_index: ui.get_audio_index(),
+        image_format_index: ui.get_image_format_index(),
+        codec: video_output_options(ui.get_video_format_index()).0.into(),
+        cq: video_quality(ui.get_video_quality_index()),
     }
 }
 

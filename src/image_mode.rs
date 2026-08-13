@@ -2,7 +2,7 @@
 //!
 //! Image mode intentionally reuses the same native ONNX detail engine as
 //! video. The difference is the source/output contract: one RGB frame enters,
-//! temporal stages are invalid, and one lossless PNG leaves.
+//! temporal stages are invalid, and one PNG, JPEG, or WebP image leaves.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -56,9 +56,11 @@ pub struct ExportSpec {
 
 impl ExportSpec {
     pub fn output_size(&self) -> (u32, u32) {
-        (
-            self.image.width.saturating_mul(self.target_scale),
-            self.image.height.saturating_mul(self.target_scale),
+        crate::resolution::dimensions(
+            self.image.width,
+            self.image.height,
+            self.target_scale,
+            false,
         )
     }
 }
@@ -215,10 +217,16 @@ fn decode_alpha(info: &ImageInfo, width: u32, height: u32) -> Result<Option<Vec<
     Ok(Some(alpha))
 }
 
-fn write_png(frame: &Frame, alpha: Option<&[u8]>, path: &Path) -> Result<(), String> {
+fn write_image(frame: &Frame, alpha: Option<&[u8]>, path: &Path) -> Result<(), String> {
     if path.exists() {
         return Err(format!("refusing to overwrite {}", path.display()));
     }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let alpha = alpha.filter(|_| matches!(extension.as_str(), "png" | "webp"));
     let pixel_format = if alpha.is_some() { "rgba" } else { "rgb24" };
     let pixels = if let Some(alpha) = alpha {
         if alpha.len() != frame.width as usize * frame.height as usize {
@@ -234,52 +242,68 @@ fn write_png(frame: &Frame, alpha: Option<&[u8]>, path: &Path) -> Result<(), Str
         frame.rgb.clone()
     };
 
-    let mut child = quiet(&mut Command::new(crate::media::ffmpeg()))
-        .args([
-            "-v",
-            "error",
-            "-n",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            pixel_format,
-            "-video_size",
-            &format!("{}x{}", frame.width, frame.height),
-            "-i",
-            "-",
-            "-frames:v",
-            "1",
-            "-c:v",
-            "png",
-            "-compression_level",
-            "6",
-        ])
+    let mut command = Command::new(crate::media::ffmpeg());
+    quiet(&mut command).args([
+        "-v",
+        "error",
+        "-n",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        pixel_format,
+        "-video_size",
+        &format!("{}x{}", frame.width, frame.height),
+        "-i",
+        "-",
+        "-frames:v",
+        "1",
+    ]);
+    match extension.as_str() {
+        "png" => {
+            command.args(["-c:v", "png", "-compression_level", "6"]);
+        }
+        "jpg" | "jpeg" => {
+            command.args(["-c:v", "mjpeg", "-q:v", "2", "-pix_fmt", "yuvj444p"]);
+        }
+        "webp" => {
+            command.args([
+                "-c:v",
+                "libwebp",
+                "-lossless",
+                "1",
+                "-compression_level",
+                "6",
+            ]);
+        }
+        _ => return Err(format!("unsupported output image format: {extension}")),
+    }
+    let mut child = command
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("could not start PNG encoder: {error}"))?;
+        .map_err(|error| format!("could not start image encoder: {error}"))?;
 
     let write_result = child
         .stdin
         .take()
-        .ok_or_else(|| "PNG encoder has no input pipe".to_string())?
+        .ok_or_else(|| "image encoder has no input pipe".to_string())?
         .write_all(&pixels);
     if let Err(error) = write_result {
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_file(path);
-        return Err(format!("writing PNG pixels: {error}"));
+        return Err(format!("writing image pixels: {error}"));
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|error| format!("waiting for PNG encoder: {error}"))?;
+        .map_err(|error| format!("waiting for image encoder: {error}"))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(path);
         return Err(format!(
-            "PNG encoder failed: {}",
+            "image encoder failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -290,7 +314,7 @@ fn write_png(frame: &Frame, alpha: Option<&[u8]>, path: &Path) -> Result<(), Str
 /// final dimensions. Generative refinement deliberately remains RGB-only.
 pub fn write_output(info: &ImageInfo, frame: &Frame, path: &Path) -> Result<(), String> {
     let alpha = decode_alpha(info, frame.width, frame.height)?;
-    write_png(frame, alpha.as_deref(), path)
+    write_image(frame, alpha.as_deref(), path)
 }
 
 pub fn finish(spec: &ExportSpec, model_output: Frame, source: &Frame) -> Frame {
@@ -367,6 +391,26 @@ mod tests {
         assert!(is_supported(Path::new("photo.jpeg")));
         assert!(is_supported(Path::new("photo.webp")));
         assert!(!is_supported(Path::new("movie.mp4")));
+    }
+
+    #[test]
+    fn writes_configurable_jpeg_and_lossless_webp() {
+        let info = probe(&logo()).expect("probe logo");
+        let frame = decode(&info).expect("decode logo");
+        for extension in ["jpg", "webp"] {
+            let output = std::env::temp_dir().join(format!(
+                "kraken-image-format-{}.{extension}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&output);
+            write_output(&info, &frame, &output).expect("write selected image format");
+            let result = probe(&output).expect("probe selected image format");
+            assert_eq!((result.width, result.height), (256, 256));
+            if extension == "webp" {
+                assert!(result.has_alpha, "lossless WebP should preserve alpha");
+            }
+            std::fs::remove_file(output).expect("remove selected image format");
+        }
     }
 
     #[test]

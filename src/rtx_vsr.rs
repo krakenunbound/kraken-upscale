@@ -75,9 +75,11 @@ pub struct ExportSpec {
 
 impl ExportSpec {
     pub fn output_size(&self) -> (u32, u32) {
-        (
-            self.image.width.saturating_mul(self.target_scale),
-            self.image.height.saturating_mul(self.target_scale),
+        crate::resolution::dimensions(
+            self.image.width,
+            self.image.height,
+            self.target_scale,
+            false,
         )
     }
 }
@@ -109,7 +111,13 @@ pub fn run(
     on_progress(0, 3);
     let source = image_mode::decode(&spec.image)?;
     on_progress(1, 3);
-    let output = upscale_frame(&source, spec.target_scale, spec.quality)?;
+    let working_scale =
+        crate::resolution::working_scale(source.width, source.height, spec.target_scale, false)?;
+    let mut output = upscale_frame(&source, working_scale, spec.quality)?;
+    let (width, height) = spec.output_size();
+    if (output.width, output.height) != (width, height) {
+        output = upscale::resample(&output, width, height);
+    }
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
@@ -285,7 +293,11 @@ impl Api {
             .ok_or_else(|| "NVCVImage.dll exports were not found".to_string())?;
         let effects = libraries
             .iter()
-            .find(|library| library.get::<NvCreateEffect>(b"NvVFX_CreateEffect\0").is_ok())
+            .find(|library| {
+                library
+                    .get::<NvCreateEffect>(b"NvVFX_CreateEffect\0")
+                    .is_ok()
+            })
             .ok_or_else(|| "NVVideoEffects.dll exports were not found".to_string())?;
 
         Ok(Self {
@@ -382,29 +394,11 @@ impl Api {
                 "initializing RTX VSR output",
             )?;
             self.check(
-                (self.image_alloc)(
-                    &mut input_gpu,
-                    source.width,
-                    source.height,
-                    6,
-                    1,
-                    0,
-                    1,
-                    1,
-                ),
+                (self.image_alloc)(&mut input_gpu, source.width, source.height, 6, 1, 0, 1, 1),
                 "allocating RTX VSR input on the GPU",
             )?;
             self.check(
-                (self.image_alloc)(
-                    &mut output_gpu,
-                    output_width,
-                    output_height,
-                    6,
-                    1,
-                    0,
-                    1,
-                    1,
-                ),
+                (self.image_alloc)(&mut output_gpu, output_width, output_height, 6, 1, 0, 1, 1),
                 "allocating RTX VSR output on the GPU",
             )?;
             self.check(

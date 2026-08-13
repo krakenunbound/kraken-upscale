@@ -29,6 +29,9 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub generative_quality_finish: bool,
     pub scale_index: i32,
+    /// 0..3 named short-edge goals, 4..6 multiplier goals.
+    #[serde(default = "default_resolution_index")]
+    pub resolution_index: i32,
     pub strength: f32,
     pub detail_limit: f32,
     pub fp16: bool,
@@ -51,6 +54,17 @@ pub struct Settings {
     pub dock_panel: i32,
     pub view_mode: i32,
 
+    /// Right settings rail: Input, Enhance, Motion, Output.
+    pub right_panel: i32,
+    /// MP4 H.264, MP4 H.265, MKV H.264, MKV H.265.
+    pub video_format_index: i32,
+    /// Best, High, Balanced.
+    pub video_quality_index: i32,
+    /// Copy source audio or omit audio.
+    pub audio_index: i32,
+    /// PNG, JPEG, WebP.
+    pub image_format_index: i32,
+
     pub codec: String,
     pub cq: u32,
 }
@@ -71,6 +85,7 @@ impl Default for Settings {
             generative_tile_index: 1,
             generative_quality_finish: true,
             scale_index: 0,
+            resolution_index: default_resolution_index(),
             strength: 1.0,
             detail_limit: 1.0,
             fp16: true,
@@ -91,6 +106,11 @@ impl Default for Settings {
 
             dock_panel: 0,
             view_mode: 0,
+            right_panel: 1,
+            video_format_index: 0,
+            video_quality_index: 1,
+            audio_index: 0,
+            image_format_index: 0,
 
             codec: "h264_nvenc".into(),
             cq: 19,
@@ -100,6 +120,11 @@ impl Default for Settings {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_resolution_index() -> i32 {
+    // Full HD is the useful first target for the app's usual 720p/AI sources.
+    1
 }
 
 pub fn path() -> PathBuf {

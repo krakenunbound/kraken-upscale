@@ -26,9 +26,18 @@ way. `models/video/` contains genuine neighboring-frame models such as NanoVSR.
 
 The toolbar now has a separate Images mode. It accepts PNG/JPEG/WebP/BMP/TIFF,
 filters the picker to the existing still-image models, previews through the
-native tiled CUDA path, and writes lossless PNG tasks. Alpha is preserved
-separately from RGB inference. Video and image tasks may coexist in the queue,
-and each mode remembers its own selected model.
+native tiled CUDA path, and writes selectable PNG, JPEG 95, or lossless WebP.
+Alpha is preserved separately from RGB inference when the chosen format
+supports it. Video and image tasks may coexist in the queue, and each mode
+remembers its own selected model.
+
+Output sizing offers both named goals (720p, 1080p, 1440p, 2160p) and direct
+x2/x3/x4 multiplication. Named goals preserve aspect ratio automatically and
+work in portrait or landscape. The far-right edge now carries vertical INPUT,
+ENHANCE, MOTION, and OUTPUT margin tabs; the Upscale controls remain pinned at
+the bottom. A single loaded source can be upscaled directly without first
+adding it to the batch. Video output supports MP4/MKV, H.264/H.265 NVENC,
+three CQ presets, and audio copy/none.
 
 Images mode also offers **RTX VSR**, a fast faithful NVIDIA backend separate
 from both the ONNX model path and Generative Refine. It calls the Video Effects
