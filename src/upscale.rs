@@ -44,11 +44,11 @@ impl ModelEntry {
 
     pub fn display_name(&self) -> String {
         if self.is_video() {
-            format!("VIDEO · multi-frame · {}", self.name)
+            format!("Multi-frame · {}", self.name)
         } else if self.video_tuned {
-            format!("VIDEO · fast frame model · {}", self.name)
+            format!("Frame · {}", self.name)
         } else {
-            format!("IMAGE · {}", self.name)
+            format!("Image · {}", self.name)
         }
     }
 }

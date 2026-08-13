@@ -52,6 +52,10 @@ Action-row separators are pinned to row boundaries and must never cross a
 button. The `upscale` brand word in the header uses individually growing
 letters from the small `u` to the large `e`; action buttons keep ordinary text.
 
+The right settings drawer is 480px wide so the full model choices remain
+readable. Model labels intentionally use concise `Multi-frame`, `Frame`, or
+`Image` prefixes because the current application mode is already obvious.
+
 Images mode also offers **RTX VSR**, a fast faithful NVIDIA backend separate
 from both the ONNX model path and Generative Refine. It calls the Video Effects
 SDK directly using the optional `rtx-vsr/` payload beside the executable.

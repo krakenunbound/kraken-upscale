@@ -48,6 +48,9 @@ export global Pal {
     out property <length> radius: 4px;
     out property <length> gap: 10px;
     out property <length> pad: 12px;
-    out property <length> rail-w: 348px;
+    // Wide enough for complete model names and their native scale. The prior
+    // 348px rail left only ~240px after labels/padding, truncating nearly every
+    // video model at the part that distinguished it.
+    out property <length> rail-w: 480px;
     out property <length> row-h: 30px;
 }

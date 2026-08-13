@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — readable model selector
+
+- Widened the right settings drawer from 348px to 480px so long model names
+  fit in the Detail Model selector and popup.
+- Removed redundant mode prefixes from selector rows: video entries now use
+  concise `Multi-frame · …` or `Frame · …` labels, and image entries use
+  `Image · …`. Native scale remains visible.
+- Built both easy-launch GUI copies (43,386,880 bytes; SHA-256
+  `83A787F04D37F6F1DAA08F07FF9C7A99783E95E42B1C52C4A4E49845EEB95D76`) and
+  visually verified every installed video-model name and scale in the native
+  dropdown.
+
 ## Unreleased — clean action rows and growing brand word
 
 - Anchored action-row separators to their top edges so no line is drawn

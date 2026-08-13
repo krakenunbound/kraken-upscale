@@ -18,6 +18,21 @@ Last updated: 2026-08-13
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B56 — Model names were unreadable in the narrow settings drawer
+
+- **Where:** ENHANCE drawer, Detail Model selector and its dropdown
+- **What:** the 348px drawer left roughly 240px for the value after its label,
+  padding, and chevron. Repetitive `VIDEO · fast frame model ·` prefixes then
+  consumed that space before the actual model name appeared.
+- **Impact:** installed models looked almost identical and could not be chosen
+  confidently without guessing from truncated text.
+- **Fix:** widened the right drawer to 480px and shortened the mode-redundant
+  labels to `Multi-frame · …`, `Frame · …`, and `Image · …`. Native scale
+  remains visible at the end of every entry.
+- **Verification:** the complete installed video-model list was checked in the
+  native dropdown at the normal application width.
+- [x] B56 — model names are readable in the right drawer
+
 ### B55 — Row separators were drawn through action buttons
 
 - **Where:** image/video Add-to-Batch row and collapsed bottom action bar
