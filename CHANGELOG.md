@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — source-aware resolution colors
+
+- Resolution choices now compare themselves with the loaded source: red marks
+  a downsize, amber marks a target within 5%, green marks a normal upscale, and
+  cyan marks a large upscale.
+- The selected value uses the same color as its dropdown row, and the OUTPUT
+  panel includes a compact legend. x2 stays green while x3/x4 are cyan.
+- Added regression coverage for exact, near-source, downscale, normal-upscale,
+  large-upscale, and multiplier classifications.
+- Built both easy-launch GUI copies (43,245,056 bytes; SHA-256
+  `27FEFA2EF9992BF7B13DDE4ED3D708C49B42635E378BD34A6850632483805CA6`) and
+  visually verified the menu and legend with an aspect-preserved 1080p source.
+
 ## Unreleased — goal-based output and right-margin workflow
 
 - Added HD 720p, Full HD 1080p, 2K 1440p, and 4K/UHD 2160p output goals while

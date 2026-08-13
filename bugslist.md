@@ -18,6 +18,22 @@ Last updated: 2026-08-13
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B53 — Resolution goals did not reveal whether they enlarge or shrink
+
+- **Where:** OUTPUT resolution selector
+- **What:** 720p, 1080p, 1440p, and 2160p were presented identically even when
+  the loaded source was already larger than one or more of those targets.
+- **Impact:** choosing a familiar label could silently request a downsize or an
+  almost-no-op rather than an upscale.
+- **Fix:** every resolution row and the selected value are now source-aware:
+  red means downsize, amber means within 5% of the source short edge, green
+  means a normal upscale, and cyan means a large upscale. A visible legend
+  explains the colors. x2 remains green; x3/x4 are cyan.
+- **Verification:** classification tests cover UHD→1080p downsize, exact and
+  near-1080p source matches, normal and large named upscales, and multiplier
+  classes.
+- [x] B53 — resolution choices communicate downsize / same / upscale
+
 ### B52 — Output workflow exposed implementation details instead of user goals
 
 - **Where:** right-side settings, resolution selection, task creation, and

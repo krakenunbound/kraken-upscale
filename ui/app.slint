@@ -111,6 +111,10 @@ export component MainWindow inherits Window {
     in property <int> models-count: 0;
     in property <string> export-summary: "mp4 · H.264 NVENC · CQ 19 · audio copy";
     in-out property <int> resolution-index: 1;
+    in property <int> goal-class-720: 1;
+    in property <int> goal-class-1080: 1;
+    in property <int> goal-class-1440: 2;
+    in property <int> goal-class-2160: 2;
     in-out property <int> right-panel: 1; // 0 Input, 1 Enhance, 2 Motion, 3 Output
     in-out property <int> video-format-index: 0;
     in-out property <int> video-quality-index: 1;
@@ -138,6 +142,23 @@ export component MainWindow inherits Window {
     property <bool> stb-open: true;
     property <bool> fi-open: false;
     property <bool> col-open: false;
+
+    property <color> goal-color-720: !root.has-clip ? Pal.text
+        : root.goal-class-720 == 0 ? Pal.danger
+        : root.goal-class-720 == 1 ? Pal.warn
+        : root.goal-class-720 == 2 ? Pal.ok : Pal.accent;
+    property <color> goal-color-1080: !root.has-clip ? Pal.text
+        : root.goal-class-1080 == 0 ? Pal.danger
+        : root.goal-class-1080 == 1 ? Pal.warn
+        : root.goal-class-1080 == 2 ? Pal.ok : Pal.accent;
+    property <color> goal-color-1440: !root.has-clip ? Pal.text
+        : root.goal-class-1440 == 0 ? Pal.danger
+        : root.goal-class-1440 == 1 ? Pal.warn
+        : root.goal-class-1440 == 2 ? Pal.ok : Pal.accent;
+    property <color> goal-color-2160: !root.has-clip ? Pal.text
+        : root.goal-class-2160 == 0 ? Pal.danger
+        : root.goal-class-2160 == 1 ? Pal.warn
+        : root.goal-class-2160 == 2 ? Pal.ok : Pal.accent;
 
     callback import-clicked();
     callback mode-changed(int);
@@ -1900,13 +1921,30 @@ export component MainWindow inherits Window {
                                             "Multiplier · x3",
                                             "Multiplier · x4",
                                         ];
+                                        item-colors: [
+                                            root.goal-color-720,
+                                            root.goal-color-1080,
+                                            root.goal-color-1440,
+                                            root.goal-color-2160,
+                                            Pal.ok,
+                                            Pal.accent,
+                                            Pal.accent,
+                                        ];
                                         current <=> root.resolution-index;
                                         changed(i) => { root.settings-changed(); }
                                     }
 
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Text { text: "● Downsize"; color: Pal.danger; font-size: 9px; }
+                                        Text { text: "● Near source"; color: Pal.warn; font-size: 9px; }
+                                        Text { text: "● Upscale"; color: Pal.ok; font-size: 9px; }
+                                        Text { text: "● Large"; color: Pal.accent; font-size: 9px; }
+                                    }
+
                                     Help {
-                                        lines: 3;
-                                        text: "Named goals preserve the source aspect ratio automatically: landscape targets output height and portrait targets output width. x2/x3/x4 remain available for direct multiplication.";
+                                        lines: 4;
+                                        text: "Colors compare each goal with the loaded source. Near source means within 5%. Named goals preserve aspect ratio: landscape targets height and portrait targets width. x2/x3/x4 remain direct multipliers.";
                                     }
 
                                     if root.scale-note != "": HorizontalLayout {

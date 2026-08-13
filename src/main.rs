@@ -3262,6 +3262,14 @@ fn clear_source_display(ui: &MainWindow) {
     ui.set_zoom(1.0);
     ui.set_pan_x(0.0);
     ui.set_pan_y(0.0);
+    set_resolution_classes(ui, 0, 0);
+}
+
+fn set_resolution_classes(ui: &MainWindow, width: u32, height: u32) {
+    ui.set_goal_class_720(resolution::classify(width, height, 720) as i32);
+    ui.set_goal_class_1080(resolution::classify(width, height, 1080) as i32);
+    ui.set_goal_class_1440(resolution::classify(width, height, 1440) as i32);
+    ui.set_goal_class_2160(resolution::classify(width, height, 2160) as i32);
 }
 
 fn load_image(ui: &MainWindow, info: &image_mode::ImageInfo) {
@@ -3275,6 +3283,7 @@ fn load_image(ui: &MainWindow, info: &image_mode::ImageInfo) {
     ui.set_zoom(1.0);
     ui.set_pan_x(0.0);
     ui.set_pan_y(0.0);
+    set_resolution_classes(ui, info.width, info.height);
     ui.set_has_clip(true);
 }
 
@@ -3293,6 +3302,7 @@ fn load_clip(ui: &MainWindow, info: &media::ClipInfo) {
     ui.set_clip_aspect(info.width as f32 / info.height.max(1) as f32);
     ui.set_clip_duration(info.duration as f32);
     ui.set_clip_fps(info.fps as f32);
+    set_resolution_classes(ui, info.width, info.height);
 
     // Interlaced sources need the front-end before any detail model runs, so
     // surface it as soon as the clip loads rather than at export time.

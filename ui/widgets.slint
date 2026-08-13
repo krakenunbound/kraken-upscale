@@ -285,6 +285,7 @@ export component SegBtn inherits Rectangle {
 
 export component Dropdown inherits Rectangle {
     in property <[string]> items;
+    in property <[color]> item-colors: [];
     in-out property <int> current: 0;
     in property <bool> accent: false;
     in property <bool> enabled: true;
@@ -320,7 +321,9 @@ export component Dropdown inherits Rectangle {
                     width: parent.width - 10px;
                     height: 100%;
                     text: root.items[root.current];
-                    color: root.accent ? Pal.accent : Pal.text;
+                    color: root.item-colors.length > root.current
+                        ? root.item-colors[root.current]
+                        : root.accent ? Pal.accent : Pal.text;
                     font-size: 12px;
                     font-weight: root.accent ? 600 : 400;
                     vertical-alignment: center;
@@ -365,7 +368,9 @@ export component Dropdown inherits Rectangle {
                         width: parent.width - 16px;
                         height: 100%;
                         text: it;
-                        color: i == root.current ? Pal.accent : Pal.text;
+                        color: root.item-colors.length > i
+                            ? root.item-colors[i]
+                            : i == root.current ? Pal.accent : Pal.text;
                         font-size: 12px;
                         vertical-alignment: center;
                         overflow: elide;
@@ -509,6 +514,7 @@ export component SliderRow inherits HorizontalLayout {
 export component FieldRow inherits HorizontalLayout {
     in property <string> text;
     in property <[string]> items;
+    in property <[color]> item-colors: [];
     in property <bool> accent: false;
     in property <bool> enabled: true;
     in-out property <int> current: 0;
@@ -524,6 +530,7 @@ export component FieldRow inherits HorizontalLayout {
 
     Dropdown {
         items: root.items;
+        item-colors: root.item-colors;
         current <=> root.current;
         accent: root.accent;
         enabled: root.enabled;

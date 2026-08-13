@@ -7,6 +7,45 @@
 
 pub const GOALS: [u32; 7] = [720, 1080, 1440, 2160, 2, 3, 4];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum GoalClass {
+    Downscale = 0,
+    NearSource = 1,
+    Upscale = 2,
+    LargeUpscale = 3,
+}
+
+/// Classifies a goal for source-aware UI coloring.
+///
+/// Named goals are compared with the source short edge because that is the
+/// edge they target. A five-percent band reads as "essentially the same" and
+/// avoids marking a 1078px source versus 1080p as a meaningful upscale.
+pub fn classify(width: u32, height: u32, goal: u32) -> GoalClass {
+    if goal <= 4 {
+        return if goal >= 3 {
+            GoalClass::LargeUpscale
+        } else {
+            GoalClass::Upscale
+        };
+    }
+    let short_edge = width.min(height);
+    if short_edge == 0 {
+        return GoalClass::NearSource;
+    }
+    let target = goal as u64 * 100;
+    let source = short_edge as u64;
+    if target < source * 95 {
+        GoalClass::Downscale
+    } else if target <= source * 105 {
+        GoalClass::NearSource
+    } else if target < source * 300 {
+        GoalClass::Upscale
+    } else {
+        GoalClass::LargeUpscale
+    }
+}
+
 pub fn from_index(index: i32) -> u32 {
     GOALS[(index.max(0) as usize).min(GOALS.len() - 1)]
 }
@@ -112,5 +151,16 @@ mod tests {
     fn rejects_downscale_and_more_than_four_x() {
         assert!(working_scale(1920, 1080, 720, true).is_err());
         assert!(working_scale(320, 180, 2160, true).is_err());
+    }
+
+    #[test]
+    fn classifies_goals_relative_to_the_source_short_edge() {
+        assert_eq!(classify(3840, 2160, 1080), GoalClass::Downscale);
+        assert_eq!(classify(1920, 1080, 1080), GoalClass::NearSource);
+        assert_eq!(classify(1920, 1078, 1080), GoalClass::NearSource);
+        assert_eq!(classify(1280, 720, 1080), GoalClass::Upscale);
+        assert_eq!(classify(640, 360, 1440), GoalClass::LargeUpscale);
+        assert_eq!(classify(8000, 8000, 2), GoalClass::Upscale);
+        assert_eq!(classify(8000, 8000, 4), GoalClass::LargeUpscale);
     }
 }

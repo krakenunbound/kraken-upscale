@@ -39,6 +39,11 @@ the bottom. A single loaded source can be upscaled directly without first
 adding it to the batch. Video output supports MP4/MKV, H.264/H.265 NVENC,
 three CQ presets, and audio copy/none.
 
+The resolution selector is source-aware. Red choices would downsize the
+loaded source, amber choices are within 5% of its short edge, green choices are
+normal upscales, and cyan choices are large upscales. The same color is used
+for the currently selected value.
+
 Images mode also offers **RTX VSR**, a fast faithful NVIDIA backend separate
 from both the ONNX model path and Generative Refine. It calls the Video Effects
 SDK directly using the optional `rtx-vsr/` payload beside the executable.
