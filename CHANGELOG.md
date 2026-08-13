@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — clean action rows and growing brand word
+
+- Anchored action-row separators to their top edges so no line is drawn
+  through Add-to-Batch or bottom Upscale controls.
+- Gave the ready/transport row and collapsed action bar fixed, clipped bounds
+  to prevent controls from straddling neighboring sections.
+- The `upscale` word in the Kraken header now grows one letter at a time from
+  the small `u` through the large `e`, making the brand word visually upscale.
+  Action-button labels remain conventional for immediate readability.
+- Built both easy-launch GUI copies (43,386,880 bytes; SHA-256
+  `28A5061D58A9484CDC619FD4F4CCDA46F096B35A51D20332E2235CFBEC907B26`) and
+  visually verified the clean separators, growing header word, and standard
+  action-button label.
+
 ## Unreleased — collapsed startup workspace
 
 - The right settings drawer now starts closed on every launch instead of

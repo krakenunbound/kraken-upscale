@@ -18,6 +18,21 @@ Last updated: 2026-08-13
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B55 — Row separators were drawn through action buttons
+
+- **Where:** image/video Add-to-Batch row and collapsed bottom action bar
+- **What:** one-pixel separators had a height but no explicit top coordinate,
+  allowing Slint to center them vertically inside their parent rectangles.
+- **Impact:** horizontal lines crossed button fills and labels, making active
+  controls look struck through.
+- **Fix:** affected separators are now explicitly anchored at `x = 0, y = 0`
+  with full row width. The ready/transport row and collapsed action bar also
+  have fixed, clipped layout bounds so their controls cannot overlap adjacent
+  sections.
+- **Verification:** live checks with an imported image confirm clean Add RTX to
+  Batch and bottom action buttons with separators confined to row boundaries.
+- [x] B55 — separators no longer cross buttons
+
 ### B54 — Output drawer opened automatically on a fresh launch
 
 - **Where:** right-margin settings drawer at application startup

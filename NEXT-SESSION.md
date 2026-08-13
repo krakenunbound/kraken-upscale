@@ -48,6 +48,10 @@ The right settings drawer always starts closed. Its far-right INPUT, ENHANCE,
 MOTION, and OUTPUT tabs toggle the relevant drawer; Upscale and Batch Upscale
 remain available in a bottom action bar while it is collapsed.
 
+Action-row separators are pinned to row boundaries and must never cross a
+button. The `upscale` brand word in the header uses individually growing
+letters from the small `u` to the large `e`; action buttons keep ordinary text.
+
 Images mode also offers **RTX VSR**, a fast faithful NVIDIA backend separate
 from both the ONNX model path and Generative Refine. It calls the Video Effects
 SDK directly using the optional `rtx-vsr/` payload beside the executable.
