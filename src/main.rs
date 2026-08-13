@@ -436,7 +436,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ]));
     let current_mode = Rc::new(Cell::new(initial_mode));
     ui.set_resolution_index(saved.resolution_index.clamp(0, 6));
-    ui.set_right_panel(saved.right_panel.clamp(0, 3));
+    // A fresh workspace starts clean regardless of which settings category
+    // happened to be open when the previous session closed.
+    ui.set_right_panel(-1);
     ui.set_video_format_index(saved.video_format_index.clamp(0, 3));
     ui.set_video_quality_index(saved.video_quality_index.clamp(0, 2));
     ui.set_audio_index(saved.audio_index.clamp(0, 1));

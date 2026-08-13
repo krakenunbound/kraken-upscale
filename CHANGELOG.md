@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — collapsed startup workspace
+
+- The right settings drawer now starts closed on every launch instead of
+  restoring or defaulting to an open category.
+- Right-margin INPUT, ENHANCE, MOTION, and OUTPUT tabs now toggle their drawer
+  open and closed.
+- Upscale and Batch Upscale remain pinned at the bottom when the drawer is
+  collapsed.
+- Built both easy-launch GUI copies (43,323,904 bytes; SHA-256
+  `E4AC7FF1275E782C7BB562BA955B0D1DADA197F81915B054C804D2419FDEA2D7`) and
+  visually verified closed startup plus OUTPUT open/close toggling.
+
 ## Unreleased — source-aware resolution colors
 
 - Resolution choices now compare themselves with the loaded source: red marks

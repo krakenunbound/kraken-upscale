@@ -54,7 +54,9 @@ pub struct Settings {
     pub dock_panel: i32,
     pub view_mode: i32,
 
-    /// Right settings rail: Input, Enhance, Motion, Output.
+    /// Right settings rail: -1 = closed; 0 = Input, 1 = Enhance, 2 = Motion,
+    /// 3 = Output. The saved value is retained for compatibility, but startup
+    /// deliberately begins closed.
     pub right_panel: i32,
     /// MP4 H.264, MP4 H.265, MKV H.264, MKV H.265.
     pub video_format_index: i32,
@@ -106,7 +108,7 @@ impl Default for Settings {
 
             dock_panel: 0,
             view_mode: 0,
-            right_panel: 1,
+            right_panel: -1,
             video_format_index: 0,
             video_quality_index: 1,
             audio_index: 0,

@@ -18,6 +18,20 @@ Last updated: 2026-08-13
 > fixed; B34 was investigated and closed as not a defect. The descriptions are
 > kept as the record of what was wrong and why.
 
+### B54 — Output drawer opened automatically on a fresh launch
+
+- **Where:** right-margin settings drawer at application startup
+- **What:** the last saved right-side category was restored, and older/default
+  settings selected a category instead of presenting a closed workspace.
+- **Impact:** a fresh launch could immediately consume a large part of the
+  workspace with OUTPUT controls the user had not requested.
+- **Fix:** startup now always collapses the settings drawer. INPUT, ENHANCE,
+  MOTION, and OUTPUT tabs toggle their own drawer open and closed. Upscale and
+  Batch Upscale remain pinned along the bottom while the drawer is closed.
+- **Verification:** fresh-launch visual check confirms only the right margin
+  tabs are visible; opening and re-clicking OUTPUT expands and collapses it.
+- [x] B54 — right settings drawer starts closed
+
 ### B53 — Resolution goals did not reveal whether they enlarge or shrink
 
 - **Where:** OUTPUT resolution selector

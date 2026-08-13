@@ -44,6 +44,10 @@ loaded source, amber choices are within 5% of its short edge, green choices are
 normal upscales, and cyan choices are large upscales. The same color is used
 for the currently selected value.
 
+The right settings drawer always starts closed. Its far-right INPUT, ENHANCE,
+MOTION, and OUTPUT tabs toggle the relevant drawer; Upscale and Batch Upscale
+remain available in a bottom action bar while it is collapsed.
+
 Images mode also offers **RTX VSR**, a fast faithful NVIDIA backend separate
 from both the ONNX model path and Generative Refine. It calls the Video Effects
 SDK directly using the optional `rtx-vsr/` payload beside the executable.
