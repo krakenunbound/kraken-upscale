@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use slint::{Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
@@ -76,6 +77,10 @@ const GENERATIVE_TILES: [u32; 3] = [512, 768, 1024];
 /// that per-tile overhead stays irrelevant.
 const SAFE_TILE: u32 = 256;
 const OVERLAP: u32 = 16;
+/// Pause/stop: wait to see if the user is done watching.
+const SAMPLE_AFTER_PAUSE_MS: u64 = 2000;
+/// Scrub idle: much shorter; they already chose a frame.
+const SAMPLE_AFTER_SCRUB_MS: u64 = 400;
 
 fn recommended_tile() -> u32 {
     match gpu::stats().map(|s| s.vram_total_gb()) {
@@ -531,6 +536,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Source frames decode off the event loop too, or scrubbing freezes the UI.
     let before_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let before_tx = spawn_before_worker(ui.as_weak(), before_generation.clone());
+    let playback = spawn_playback_worker(ui.as_weak());
 
     // Kick a preview render from whatever the controls currently say.
     let request = {
@@ -543,6 +549,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let preview_generation = preview_generation.clone();
         move || {
             let ui = handle.unwrap();
+            // Playback owns the before pane. Sampling waits until the
+            // playhead is actually still — see schedule_sample.
+            if ui.get_mode_index() == 0 && ui.get_playing() {
+                return;
+            }
             let selected_model = active_models
                 .borrow()
                 .get(ui.get_model_index().max(0) as usize)
@@ -733,6 +744,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let before_tx = before_tx.clone();
         let before_generation = before_generation.clone();
         let preview_generation = preview_generation.clone();
+        let playback = playback.clone();
         move |path: std::path::PathBuf| {
             let Some(ui) = handle.upgrade() else { return };
             let image_path = image_mode::is_supported(&path);
@@ -751,7 +763,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         // invalidate any result the previous image may still
                         // have queued from its GPU worker.
                         preview_generation.fetch_add(1, Ordering::Relaxed);
-                        clear_source_display(&ui);
+                        clear_source_display(&ui, &playback);
                         log(
                             &ui.as_weak(),
                             format!(
@@ -843,16 +855,39 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Sample-frame upscale waits until the playhead has been still.
+    // Playback never shares this timer: it streams source frames only.
+    let idle_upscale = Rc::new(slint::Timer::default());
+    let schedule_sample = {
+        let idle_upscale = idle_upscale.clone();
+        let request = request.clone();
+        move |delay_ms: u64| {
+            let request = request.clone();
+            idle_upscale.start(
+                slint::TimerMode::SingleShot,
+                Duration::from_millis(delay_ms),
+                move || request(),
+            );
+        }
+    };
+
     {
         let handle = ui.as_weak();
         let clip = clip.clone();
-        let request = request.clone();
+        let schedule_sample = schedule_sample.clone();
         let before_tx = before_tx.clone();
         let before_generation = before_generation.clone();
+        let playback = playback.clone();
         ui.on_seek(move |pos| {
             let ui = handle.unwrap();
             if ui.get_mode_index() == 1 {
                 return;
+            }
+            // Scrubbing interrupts play. The decoder is killed here so it
+            // cannot keep writing frames over the playhead the user is moving.
+            if ui.get_playing() {
+                ui.set_playing(false);
+                playback.stop();
             }
             if let Some(info) = clip.borrow().as_ref() {
                 // Queued, not decoded here: this runs on the event loop and a
@@ -870,7 +905,45 @@ fn main() -> Result<(), slint::PlatformError> {
                     thumbnail: false,
                 });
             }
-            request();
+            schedule_sample(SAMPLE_AFTER_SCRUB_MS);
+        });
+    }
+
+    {
+        let handle = ui.as_weak();
+        let clip = clip.clone();
+        let idle_upscale = idle_upscale.clone();
+        let schedule_sample = schedule_sample.clone();
+        let preview_generation = preview_generation.clone();
+        let before_generation = before_generation.clone();
+        let playback = playback.clone();
+        ui.on_playback_changed(move |playing| {
+            if playing {
+                idle_upscale.stop();
+                // Drop any in-flight sample so it cannot paint over play.
+                preview_generation.fetch_add(1, Ordering::Relaxed);
+                before_generation.fetch_add(1, Ordering::Relaxed);
+                let Some(ui) = handle.upgrade() else { return };
+                ui.set_preview_status("playing source…".into());
+                let Some(info) = clip.borrow().clone() else {
+                    ui.set_playing(false);
+                    return;
+                };
+                let start_secs =
+                    ui.get_playhead().clamp(0.0, 1.0) as f64 * info.duration;
+                playback.start(
+                    info,
+                    start_secs,
+                    media::SourceTreatment {
+                        content: ui.get_content_index(),
+                        restore: ui.get_restore_index(),
+                        deinterlace: ui.get_detect_fields(),
+                    },
+                );
+            } else {
+                playback.stop();
+                schedule_sample(SAMPLE_AFTER_PAUSE_MS);
+            }
         });
     }
 
@@ -888,6 +961,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let before_tx = before_tx.clone();
         let before_generation = before_generation.clone();
         let preview_generation = preview_generation.clone();
+        let playback = playback.clone();
         ui.on_mode_changed(move |requested_mode| {
             let Some(ui) = handle.upgrade() else { return };
             let next_mode = requested_mode.clamp(0, 1);
@@ -912,7 +986,7 @@ fn main() -> Result<(), slint::PlatformError> {
             set_model_picker(&ui, &active_models.borrow(), &selected);
 
             preview_generation.fetch_add(1, Ordering::Relaxed);
-            clear_source_display(&ui);
+            clear_source_display(&ui, &playback);
             if next_mode == 0 {
                 if let Some(info) = clip.borrow().clone() {
                     load_clip(&ui, &info);
@@ -1026,6 +1100,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let clip = clip.clone();
         let still = still.clone();
         let preview_generation = preview_generation.clone();
+        let playback = playback.clone();
         ui.on_clear_video(move || {
             let Some(ui) = handle.upgrade() else { return };
             preview_generation.fetch_add(1, Ordering::Relaxed);
@@ -1035,7 +1110,7 @@ fn main() -> Result<(), slint::PlatformError> {
             } else {
                 clip.borrow_mut().take();
             }
-            clear_source_display(&ui);
+            clear_source_display(&ui, &playback);
             ui.set_preview_status(
                 if image_mode {
                     "image cleared"
@@ -2933,6 +3008,178 @@ fn spawn_exporter(
     tx
 }
 
+/// Commands for the sequential source player.
+enum PlaybackCommand {
+    Start {
+        session: u64,
+        clip: media::ClipInfo,
+        start_secs: f64,
+        treatment: media::SourceTreatment,
+    },
+    Stop,
+}
+
+/// Shared handle so pause/scrub can kill a blocked ffmpeg read.
+#[derive(Clone)]
+struct PlaybackControl {
+    session: Arc<std::sync::atomic::AtomicU64>,
+    child: Arc<Mutex<Option<std::process::Child>>>,
+    tx: Sender<PlaybackCommand>,
+}
+
+impl PlaybackControl {
+    fn start(
+        &self,
+        clip: media::ClipInfo,
+        start_secs: f64,
+        treatment: media::SourceTreatment,
+    ) {
+        let session = self.session.fetch_add(1, Ordering::Relaxed) + 1;
+        kill_playback_child(&self.child);
+        let _ = self.tx.send(PlaybackCommand::Start {
+            session,
+            clip,
+            start_secs,
+            treatment,
+        });
+    }
+
+    fn stop(&self) {
+        self.session.fetch_add(1, Ordering::Relaxed);
+        kill_playback_child(&self.child);
+        let _ = self.tx.send(PlaybackCommand::Stop);
+    }
+}
+
+fn kill_playback_child(slot: &Mutex<Option<std::process::Child>>) {
+    if let Some(mut child) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Streams source frames at the clip rate into the before pane.
+///
+/// This path is only a player. Sample-frame upscale is scheduled by the UI
+/// once play stops and the playhead has been still.
+fn spawn_playback_worker(handle: slint::Weak<MainWindow>) -> PlaybackControl {
+    let (tx, rx) = channel::<PlaybackCommand>();
+    let session = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let child = Arc::new(Mutex::new(None));
+    let worker_session = session.clone();
+    let worker_child = child.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(cmd) = rx.recv() {
+            let PlaybackCommand::Start {
+                session: wanted,
+                clip,
+                start_secs,
+                treatment,
+            } = cmd
+            else {
+                continue;
+            };
+            if wanted < worker_session.load(Ordering::Relaxed) {
+                continue;
+            }
+
+            let mut stream = match media::SourceStream::open(&clip, start_secs, treatment) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let h = handle.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = h.upgrade() {
+                            ui.set_playing(false);
+                            ui.set_preview_status(format!("playback failed: {error}").into());
+                        }
+                    });
+                    continue;
+                }
+            };
+            stream.share_child(&worker_child);
+            if wanted < worker_session.load(Ordering::Relaxed) {
+                kill_playback_child(&worker_child);
+                continue;
+            }
+
+            let duration = clip.duration.max(0.000_001);
+            let origin = Instant::now();
+            let origin_secs = start_secs;
+            let pending = Arc::new(AtomicBool::new(false));
+
+            loop {
+                if wanted < worker_session.load(Ordering::Relaxed) {
+                    break;
+                }
+                let frame = match stream.next_frame() {
+                    Ok(Some(frame)) => frame,
+                    other => {
+                        // A pause kills the pipe. That looks like EOF, so
+                        // only treat a clean end as finished if this session
+                        // is still the active one.
+                        let stopped = wanted < worker_session.load(Ordering::Relaxed);
+                        if !stopped && matches!(other, Ok(None)) {
+                            let h = handle.clone();
+                            let sess = worker_session.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if wanted < sess.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                let Some(ui) = h.upgrade() else { return };
+                                ui.set_playhead(1.0);
+                                ui.set_playing(false);
+                                ui.invoke_playback_changed(false);
+                            });
+                        }
+                        break;
+                    }
+                };
+
+                let pos = stream.position_secs();
+                let playhead = (pos / duration).clamp(0.0, 1.0) as f32;
+                let due = origin + Duration::from_secs_f64((pos - origin_secs).max(0.0));
+                while Instant::now() < due {
+                    if wanted < worker_session.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+                if wanted < worker_session.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Drop this frame if the UI has not taken the last one yet so
+                // a slow paint cannot queue seconds of delay.
+                if pending.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                let h = handle.clone();
+                let sess = worker_session.clone();
+                let pending = pending.clone();
+                let posted = slint::invoke_from_event_loop(move || {
+                    pending.store(false, Ordering::Release);
+                    if wanted < sess.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Some(ui) = h.upgrade() else { return };
+                    if !ui.get_playing() {
+                        return;
+                    }
+                    ui.set_frame_before(to_image(&frame));
+                    ui.set_playhead(playhead);
+                });
+                if posted.is_err() {
+                    return;
+                }
+            }
+            kill_playback_child(&worker_child);
+        }
+    });
+
+    PlaybackControl { session, child, tx }
+}
+
 /// A source-frame decode request for the before-pane.
 struct BeforeJob {
     generation: u64,
@@ -3327,7 +3574,10 @@ fn preview_generation_is_current(
     current_generation.load(Ordering::Relaxed) == generation
 }
 
-fn clear_source_display(ui: &MainWindow) {
+fn clear_source_display(ui: &MainWindow, playback: &PlaybackControl) {
+    playback.stop();
+    ui.set_playing(false);
+    ui.set_playhead(0.0);
     ui.set_has_clip(false);
     ui.set_clip_name("".into());
     ui.set_clip_specs("".into());

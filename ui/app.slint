@@ -2,7 +2,7 @@ import { Pal } from "theme.slint";
 import {
     SectionLabel, FieldLabel, Help, Mono, Card, StatusPill, Check, CheckRow,
     Btn, SegBtn, Dropdown, Slid, NumBox, SliderRow, FieldRow, SectionHeader,
-    Rule, PlayGlyph, SearchGlyph, GearGlyph, SplitGlyph, Chevron,
+    Rule, PlayGlyph, PauseGlyph, SearchGlyph, GearGlyph, SplitGlyph, Chevron,
     StatRow, StatBox, VTab
 } from "widgets.slint";
 import { LineEdit, ScrollView } from "std-widgets.slint";
@@ -125,6 +125,7 @@ export component MainWindow inherits Window {
     in-out property <float> split: 0.5;
     in-out property <int> view-mode: 0;   // 0 = split, 1 = side by side
     in-out property <float> playhead: 0;
+    in-out property <bool> playing: false;
 
     // Preview transform. zoom 1.0 == fit to pane.
     in property <float> clip-aspect: 1.0;
@@ -165,7 +166,10 @@ export component MainWindow inherits Window {
     callback clear-video();
     callback clear-queue();
     callback release-gpu-memory();
+    /// Source-frame decode + idle sample. Never used as a play clock.
     callback seek(float);
+    /// True starts sequential source playback; false stops it.
+    callback playback-changed(bool);
     callback settings-changed();
     /// Re-runs the preview once an export releases the GPU.
     callback resume-preview();
@@ -968,13 +972,31 @@ export component MainWindow inherits Window {
                                     alignment: center;
                                     VerticalLayout {
                                         alignment: center;
-                                        PlayGlyph {
+                                        if root.playing: PauseGlyph {
+                                            tint: root.has-clip ? Pal.accent : Pal.text-mute;
+                                        }
+                                        if !root.playing: PlayGlyph {
                                             tint: root.has-clip ? Pal.accent : Pal.text-mute;
                                         }
                                     }
                                 }
 
-                                pl := TouchArea { }
+                                pl := TouchArea {
+                                    enabled: root.has-clip;
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (root.playing) {
+                                            root.playing = false;
+                                            root.playback-changed(false);
+                                        } else {
+                                            if (root.playhead >= 0.999) {
+                                                root.playhead = 0;
+                                            }
+                                            root.playing = true;
+                                            root.playback-changed(true);
+                                        }
+                                    }
+                                }
                             }
 
                             // Scrub track
@@ -1058,11 +1080,11 @@ export component MainWindow inherits Window {
                                         if (tl.pressed) {
                                             root.playhead = Math.clamp(
                                                 tl.mouse-x / self.width, 0.0, 1.0);
+                                            // Source decode only. The idle
+                                            // sample waits until this stops.
+                                            root.seek(root.playhead);
                                         }
                                     }
-                                    // Decode on release rather than on every
-                                    // motion event — scrubbing would otherwise
-                                    // queue a process spawn per pixel.
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
                                             root.playhead = Math.clamp(

@@ -61,6 +61,26 @@ export component PlayGlyph inherits Path {
     fill: root.tint;
 }
 
+export component PauseGlyph inherits Rectangle {
+    in property <color> tint: Pal.accent;
+    width: 9px;
+    height: 11px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px;
+        width: 3px;
+        height: 11px;
+        background: root.tint;
+    }
+    Rectangle {
+        x: 6px;
+        width: 3px;
+        height: 11px;
+        background: root.tint;
+    }
+}
+
 export component SplitGlyph inherits Path {
     in property <color> tint: Pal.text-mute;
     width: 22px;

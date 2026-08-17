@@ -6,8 +6,9 @@
 //! streaming. Encoding targets NVENC because an LGPL build carries no
 //! libx264/libx265.
 
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -448,6 +449,135 @@ pub fn frame_at_with(
     })
 }
 
+/// Sequential source decoder for in-app playback.
+///
+/// `frame_at_with` starts a new ffmpeg process for every timestamp. That is
+/// the right tool for a still preview and the wrong one for a player: each
+/// call pays a spawn and a GOP seek, so 25 fps "playback" never looks like
+/// playback and starves the sample-frame upscale. One open pipe of CFR
+/// rgb24 frames is how export already decodes; the player uses the same
+/// shape from the current playhead.
+pub struct SourceStream {
+    child: Option<Child>,
+    stdout: std::process::ChildStdout,
+    width: u32,
+    height: u32,
+    frame_bytes: usize,
+    start_secs: f64,
+    fps: f64,
+    frames_read: u64,
+}
+
+impl SourceStream {
+    pub fn open(
+        clip: &ClipInfo,
+        start_secs: f64,
+        treatment: SourceTreatment,
+    ) -> Result<Self, String> {
+        let fps = treatment.effective_fps(clip).max(1.0);
+        let start_secs = start_secs.clamp(0.0, clip.duration.max(0.0));
+
+        let mut cmd = Command::new(ffmpeg());
+        quiet(&mut cmd).args(["-v", "error"]);
+        // Input-side seek: a player should start quickly. Preview sampling
+        // still uses the exact `frame_at_with` path after the playhead rests.
+        if start_secs > 0.001 {
+            cmd.args(["-ss", &format!("{start_secs:.6}")]);
+        }
+        cmd.arg("-i").arg(&clip.path);
+        cmd.args(["-an", "-vf", &clip.decode_filter(treatment)]);
+        cmd.args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("could not start playback decoder: {e}"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "playback decoder has no stdout".to_string())?;
+        if let Some(mut stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                let mut sink = Vec::new();
+                let _ = stderr.read_to_end(&mut sink);
+            });
+        }
+
+        let width = clip.width;
+        let height = clip.height;
+        Ok(Self {
+            child: Some(child),
+            stdout,
+            width,
+            height,
+            frame_bytes: (width as usize)
+                .saturating_mul(height as usize)
+                .saturating_mul(3),
+            start_secs,
+            fps,
+            frames_read: 0,
+        })
+    }
+
+    /// Hands the child to `slot` so the UI thread can kill a blocked read.
+    pub fn share_child(&mut self, slot: &std::sync::Mutex<Option<Child>>) {
+        if let Some(child) = self.child.take() {
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        }
+    }
+
+    pub fn next_frame(&mut self) -> Result<Option<Frame>, String> {
+        let mut rgb = vec![0u8; self.frame_bytes];
+        if !read_raw_frame(&mut self.stdout, &mut rgb)? {
+            return Ok(None);
+        }
+        self.frames_read += 1;
+        Ok(Some(Frame {
+            width: self.width,
+            height: self.height,
+            rgb,
+        }))
+    }
+
+    pub fn position_secs(&self) -> f64 {
+        if self.frames_read == 0 {
+            return self.start_secs;
+        }
+        self.start_secs + (self.frames_read as f64 - 1.0) / self.fps
+    }
+}
+
+impl Drop for SourceStream {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Zero bytes is a clean EOF between frames; a short read after any bytes is
+/// a truncated frame (or a kill mid-read, which the player treats as stop).
+fn read_raw_frame(reader: &mut impl Read, buf: &mut [u8]) -> Result<bool, String> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) if filled == 0 => return Ok(false),
+            Ok(0) => {
+                return Err(format!(
+                    "playback decoder stopped mid-frame ({filled}/{} bytes)",
+                    buf.len()
+                ))
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,5 +743,17 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn source_stream_reads_sequential_frames() {
+        let clip = probe(&asset("progressive24.mkv")).expect("probe 24p asset");
+        let mut stream =
+            SourceStream::open(&clip, 0.0, SourceTreatment::default()).expect("open stream");
+        let first = stream.next_frame().expect("read").expect("first frame");
+        let second = stream.next_frame().expect("read").expect("second frame");
+        assert_eq!((first.width, first.height), (clip.width, clip.height));
+        assert_eq!(second.rgb.len(), first.rgb.len());
+        assert!(stream.position_secs() + 1e-9 >= 1.0 / clip.fps);
     }
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 — separate playback from sample-frame upscale
+
+- Play now streams the source through one ffmpeg pipe instead of seeking a
+  new process every tick.
+- Sample-frame upscale waits until the playhead is still: two seconds after
+  pause or end, 400ms after the scrubber stops moving.
+- Playback no longer fights the per-frame preview path.
+
 ## Unreleased — live activity-log tail
 
 - Activity entries now read chronologically from oldest to newest.
