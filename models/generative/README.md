@@ -23,11 +23,10 @@ Its MIT and ggml license files are kept inside `native-diffusion/`.
 - Project: <https://github.com/leejet/stable-diffusion.cpp>
 - Pinned release: <https://github.com/leejet/stable-diffusion.cpp/releases/tag/master-813-bfbef5b>
 
-On the development workstation, the VAE, CLIP-L, and T5 payloads are NTFS
-hardlinks to the already-downloaded files under `F:\Kraken Art\models`. They
-occupy no second copy of that data. The Q6 diffusion transformer was downloaded
-directly into Kraken's package. A portable copy still needs all four actual
-files beside this manifest.
+You can NTFS-hardlink the VAE, CLIP-L, and T5 files from another local model
+folder so they occupy no second copy. The Q6 diffusion transformer is a
+separate download. A portable copy still needs all four actual files beside
+this manifest.
 
 ### RTX 3090 package
 

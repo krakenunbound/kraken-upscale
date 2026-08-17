@@ -1,10 +1,10 @@
 /target/
 /.playwright-mcp/
 
-# Downloaded/generated model payloads; keep models/models.json metadata.
-/models/*.onnx
-/models/*.pth
-/models/interpolation/*.onnx
+# Downloaded/generated model payloads; keep models/**/models.json and READMEs.
+/models/**/*.onnx
+/models/**/*.onnx.data
+/models/**/*.pth
 /.model-staging/
 /.native-staging/
 /native-diffusion/
@@ -13,6 +13,10 @@
 /models/generative/**/*.sft
 /models/generative/**/*.gguf
 /models/generative/**/*.ckpt
+
+# Local test clips — not source, and may contain copyrighted frames.
+/assets/*.mp4
+/assets/*.mkv
 
 # Redistributable runtime payloads are staged for packaging, not source control.
 /cuda/
@@ -42,3 +46,9 @@
 
 # Local run/build logs.
 /stage-err.txt
+
+# Operator notes — keep on disk, do not publish.
+/NEXT-SESSION.md
+/DECISIONS.md
+/ENHANCEMENTS.md
+/bugslist.md

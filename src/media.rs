@@ -120,7 +120,7 @@ impl SourceTreatment {
         }
         match self.content {
             // TV — shot on film. Scripted drama through the mid-2000s, which
-            // includes the DVD-era Star Trek series.
+            // includes a lot of DVD-era 4:3 television.
             2 => FieldPolicy::InverseTelecine,
             // TV — shot on video. Soaps, news, much British television.
             3 => FieldPolicy::Deinterlace,

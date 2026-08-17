@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
 description = "Native AI video upscaler"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 slint = { version = "1.17", features = ["unstable-winit-030"] }
