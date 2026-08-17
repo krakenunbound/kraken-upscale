@@ -11,8 +11,8 @@ FLUX.1 requires four components:
 - CLIP-L text encoder
 - T5-XXL text encoder
 
-The included `flux1-dev.json` shows the expected layout. Model payloads are
-local deployment files and are intentionally ignored by Git.
+The included `flux1-dev.json` shows the expected layout. Download the weight
+files yourself and place them next to that manifest.
 
 The beside-app runtime is the official Windows CUDA 12 build of
 `stable-diffusion.cpp` release `master-813-bfbef5b` plus its official CUDA 12

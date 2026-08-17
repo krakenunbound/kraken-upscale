@@ -34,9 +34,9 @@ distribution. Kraken uses only the native DLL payload; it does not import or
 launch an external scripting runtime. The runtime requires a supported NVIDIA
 RTX GPU and current driver. NVIDIA documents Windows driver 570.65 or newer.
 
-These files are NVIDIA proprietary software and are intentionally ignored by
-Git. Anyone redistributing a packaged build is responsible for complying with
-NVIDIA's runtime license.
+These files are NVIDIA proprietary software. Download them from NVIDIA's
+Video Effects / `nvidia-vfx` distribution and keep them in `rtx-vsr/`
+beside the executable. Packaged builds must follow NVIDIA's runtime license.
 
 ## Controls
 
