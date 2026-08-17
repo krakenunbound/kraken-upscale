@@ -83,7 +83,6 @@ export component MainWindow inherits Window {
     in-out property <bool> generative-quality-finish: true;
     in property <[TaskRow]> tasks: [];
     in property <[string]> log-lines: [];
-    in-out property <length> log-scroll-y: 0px;
     // Left dock: 0 = closed, 1 = logs, 2 = system.
     in-out property <int> dock-panel: 0;
     out property <length> dock-current-width: dock.width;
@@ -307,9 +306,6 @@ export component MainWindow inherits Window {
                                     root.dock-panel = 0;
                                 } else {
                                     root.dock-panel = 1;
-                                    // Activity logs are chronological. Open at
-                                    // the live tail instead of old startup lines.
-                                    root.log-scroll-y = root.log-lines.length * 30px;
                                 }
                             }
                         }
@@ -370,22 +366,23 @@ export component MainWindow inherits Window {
 
                             Rule { }
 
-                            log-scroll := ScrollView {
+                            ScrollView {
                                 vertical-stretch: 1;
-                                viewport-height: root.log-lines.length * 30px;
-                                viewport-y <=> root.log-scroll-y;
 
                                 VerticalLayout {
                                     alignment: start;
-                                    spacing: 2px;
+                                    spacing: 1px;
+                                    width: 100%;
 
                                     for line in root.log-lines: Text {
+                                        width: 100%;
+                                        height: 18px;
                                         text: line;
-                                        color: Pal.text-dim;
+                                        color: Pal.text;
                                         font-size: 10.5px;
                                         font-family: Pal.mono;
-                                        wrap: word-wrap;
-                                        min-height: 28px;
+                                        overflow: elide;
+                                        vertical-alignment: center;
                                     }
                                 }
                             }

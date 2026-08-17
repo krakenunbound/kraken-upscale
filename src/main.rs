@@ -28,6 +28,46 @@ mod video;
 
 slint::include_modules!();
 
+/// Load a model on a worker thread so Stop can return before ONNX finishes.
+/// The worker still runs to completion and drops the session if cancelled.
+fn load_interruptible<T, F>(cancel: &AtomicBool, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name("kraken-model-load".into())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .map_err(|e| format!("could not start model load: {e}"))?;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        match rx.try_recv() {
+            Ok(result) => {
+                let _ = worker.join();
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("cancelled".into());
+                }
+                return result;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                let _ = worker.join();
+                return Err("model load thread ended unexpectedly".into());
+            }
+        }
+    }
+}
+
 /// Upscale factors offered by the Scale dropdown.
 const GENERATIVE_STEPS: [u32; 4] = [8, 15, 20, 28];
 const GENERATIVE_TILES: [u32; 3] = [512, 768, 1024];
@@ -2406,7 +2446,10 @@ fn spawn_exporter(
                             ),
                         );
                         let load_started = std::time::Instant::now();
-                        match upscale::Engine::load(&model, fp16) {
+                        match load_interruptible(&cancel, {
+                            let model = model.clone();
+                            move || upscale::Engine::load(&model, fp16)
+                        }) {
                             Ok(u) => {
                                 log(
                                     &handle,
@@ -2420,6 +2463,10 @@ fn spawn_exporter(
                                     ),
                                 );
                                 loaded = Some((model.name.clone(), fp16, u));
+                            }
+                            Err(e) if e == "cancelled" => {
+                                set_task(&handle, idx, 0.0, "cancelled", false, false);
+                                continue;
                             }
                             Err(e) => {
                                 log(&handle, format!("export: model load failed: {e}"));
@@ -2478,7 +2525,7 @@ fn spawn_exporter(
                         "Load RIFE timestep model for genuine frame interpolation",
                     );
                     let rife_started = std::time::Instant::now();
-                    match interpolate::Rife::load() {
+                    match load_interruptible(&cancel, interpolate::Rife::load) {
                         Ok(rife) => {
                             log(
                                 &handle,
@@ -2490,6 +2537,10 @@ fn spawn_exporter(
                                 ),
                             );
                             rife_model = Some(rife);
+                        }
+                        Err(e) if e == "cancelled" => {
+                            set_task(&handle, idx, 0.0, "cancelled", false, false);
+                            continue;
                         }
                         Err(e) => {
                             log(&handle, format!("export: RIFE load failed: {e}"));
@@ -3023,13 +3074,12 @@ fn log(handle: &slint::Weak<MainWindow>, msg: impl Into<String>) {
             .as_any()
             .downcast_ref::<VecModel<slint::SharedString>>()
         {
-            vm.push(format!("{stamp}  {msg}").into());
+            // Newest first so the open drawer shows live activity at y = 0.
+            // Do not drive viewport-y: a y of content-height scrolls past every line.
+            vm.insert(0, format!("{stamp}  {msg}").into());
             while vm.row_count() > LOG_CAPACITY {
-                vm.remove(0);
+                vm.remove(vm.row_count() - 1);
             }
-            // Keep a running job's newest activity visible. ScrollView clamps
-            // this exact content height to its valid bottom offset.
-            ui.set_log_scroll_y((vm.row_count() * 30) as f32);
         }
     });
 }
@@ -3204,15 +3254,40 @@ fn collect_settings(
 
 /// Opens Explorer with the file selected.
 fn reveal(path: &str) {
-    let p = std::path::Path::new(path);
-    if !p.exists() {
+    let p = std::path::PathBuf::from(path);
+    if p.is_file() {
+        // `/select,C:\path with spaces\file` is split at the first space.
+        // One raw argument with quotes keeps the full path intact.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = std::process::Command::new("explorer.exe");
+            cmd.raw_arg(format!("/select,\"{}\"", p.display()));
+            if cmd.spawn().is_ok() {
+                return;
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{}", p.display()))
+                .spawn();
+            return;
+        }
+    }
+    let folder = if p.is_dir() {
+        p
+    } else {
+        p.parent()
+            .filter(|parent| parent.exists())
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or(p)
+    };
+    if !folder.exists() {
         eprintln!("reveal: {path} does not exist");
         return;
     }
-    // Explorer exits non-zero even on success, so the status is ignored.
-    let mut cmd = std::process::Command::new("explorer.exe");
-    cmd.arg(format!("/select,{}", p.display()));
-    let _ = cmd.spawn();
+    let _ = std::process::Command::new("explorer.exe").arg(&folder).spawn();
 }
 
 fn report_current(

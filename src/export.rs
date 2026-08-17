@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -131,6 +131,17 @@ impl ExportSpec {
             _ => decoded.max(1),
         }
     }
+
+    /// Known output-frame count for mux bounding. `None` when the container
+    /// reported neither duration nor a frame count — `-t` would then be one
+    /// guessed frame and would close the encoder on a real clip.
+    pub fn frame_budget(&self) -> Option<u64> {
+        if self.clip.duration > 0.0 || self.clip.frames > 0 {
+            Some(self.output_frames())
+        } else {
+            None
+        }
+    }
 }
 
 fn quiet(cmd: &mut Command) -> &mut Command {
@@ -194,12 +205,13 @@ fn spawn_encoder(spec: &ExportSpec) -> Result<Child, String> {
     if spec.out_path.extension().and_then(|ext| ext.to_str()) == Some("mp4") {
         cmd.args(["-movflags", "+faststart"]);
     }
-    // Bound the mux to the generated video's duration. `-shortest` cannot be
-    // used here: AI clips commonly have an audio stream that ends a fraction
-    // early, and ffmpeg would then close the raw-video pipe before Kraken had
-    // delivered every frame. `-t` trims overly long copied audio without ever
-    // allowing shorter audio to truncate the video.
-    cmd.arg("-t").arg(format!("{:.6}", spec.output_duration()));
+    // Bound the mux only when duration is known. `-shortest` cannot be used:
+    // AI clips commonly have audio that ends a fraction early, and ffmpeg
+    // would then close the raw-video pipe. `-t` trims long copied audio.
+    // Without a trusted duration, omit `-t` and write every decoded frame.
+    if spec.frame_budget().is_some() {
+        cmd.arg("-t").arg(format!("{:.6}", spec.output_duration()));
+    }
     cmd.arg(&spec.out_path);
 
     cmd.stdin(Stdio::piped())
@@ -256,6 +268,37 @@ fn remove_partial(path: &std::path::Path) {
     }
 }
 
+/// ffmpeg can hang after stdin close or kill. Do not block the export thread
+/// forever on `Child::wait`.
+fn wait_child(child: &mut Child, timeout: Duration) -> Result<std::process::ExitStatus, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let kill_deadline = Instant::now() + Duration::from_secs(15);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => return Ok(status),
+                        Ok(None) if Instant::now() < kill_deadline => {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Ok(None) => {
+                            return Err("ffmpeg did not exit after kill".into());
+                        }
+                        Err(e) => return Err(format!("ffmpeg wait failed: {e}")),
+                    }
+                }
+            }
+            Err(e) => return Err(format!("ffmpeg wait failed: {e}")),
+        }
+    }
+}
+
 /// Runs an export to completion. `on_progress` receives (done, total) frames.
 ///
 /// Returns the per-stage timing breakdown so callers can log where the time
@@ -297,8 +340,8 @@ pub fn run(
                     encoder_err: &mut Option<JoinHandle<String>>| {
         let _ = decoder.kill();
         let _ = encoder.kill();
-        let _ = decoder.wait();
-        let _ = encoder.wait();
+        let _ = wait_child(decoder, Duration::from_secs(15));
+        let _ = wait_child(encoder, Duration::from_secs(15));
         if let Some(t) = decoder_err.take() {
             let _ = t.join();
         }
@@ -348,10 +391,16 @@ pub fn run(
         let window = up.window();
         let apply_lock = spec.stability && window == 1;
         let mut pending = Vec::<Frame>::with_capacity(window);
+        let mut last_output: Option<Frame> = None;
 
         let mut write_frame = |source: &Frame, out: Frame| -> Result<(), String> {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
+            }
+            if let Some(limit) = spec.frame_budget() {
+                if done >= limit {
+                    return Ok(());
+                }
             }
             let mut final_frame = stages.post(|| {
                 let colored = if spec.match_color {
@@ -413,6 +462,7 @@ pub fn run(
                     .write_all(&final_frame.rgb)
                     .map_err(|e| format!("encode write failed: {e}"))
             })?;
+            last_output = Some(final_frame);
 
             done += 1;
             stages.frame_done();
@@ -503,7 +553,7 @@ pub fn run(
 
                 while let Some(right) = read_source()? {
                     let interval_end = (source_index + 1) as f64 / source_fps;
-                    while output_index < total
+                    while spec.frame_budget().is_none_or(|limit| output_index < limit)
                         && output_index as f64 / target_fps < interval_end - 1e-9
                     {
                         let output_time = output_index as f64 / target_fps;
@@ -531,10 +581,13 @@ pub fn run(
                 }
 
                 // Preserve the source duration without inventing motion beyond the
-                // last available pair.
-                while output_index < total {
-                    process_frame(&left)?;
-                    output_index += 1;
+                // last available pair. Skip when duration is unknown — there is
+                // no trusted pad count.
+                if spec.frame_budget().is_some() {
+                    while output_index < total {
+                        process_frame(&left)?;
+                        output_index += 1;
+                    }
                 }
             } else {
                 while let Some(source) = read_source()? {
@@ -563,6 +616,24 @@ pub fn run(
                 write_frame(source, output)?;
             }
         }
+        if let Some(limit) = spec.frame_budget() {
+            while done < limit {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("cancelled".into());
+                }
+                let Some(output) = last_output.as_ref() else {
+                    break;
+                };
+                stages.encode(|| {
+                    enc_in
+                        .write_all(&output.rgb)
+                        .map_err(|e| format!("encode write failed: {e}"))
+                })?;
+                done += 1;
+                stages.frame_done();
+                on_progress(done, total);
+            }
+        }
         Ok(())
     })();
 
@@ -571,8 +642,8 @@ pub fn run(
         let _ = decoder.kill();
         let _ = encoder.kill();
     }
-    let decoder_status = decoder.wait();
-    let encoder_status = encoder.wait();
+    let decoder_status = wait_child(&mut decoder, Duration::from_secs(30));
+    let encoder_status = wait_child(&mut encoder, Duration::from_secs(180));
     let decoder_text = decoder_err
         .take()
         .and_then(|t| t.join().ok())
@@ -609,14 +680,18 @@ pub fn run(
         details.push(format!("partial {}", stages.summary(run_started.elapsed())));
         return Err(format!("{e} · {}", details.join(" · ")));
     }
-    let decoder_status =
-        decoder_status.map_err(|e| format!("decoder did not exit cleanly: {e}"))?;
+    let decoder_status = decoder_status.map_err(|e| {
+        remove_partial(&spec.out_path);
+        format!("decoder did not exit cleanly: {e}")
+    })?;
     if !decoder_status.success() {
         remove_partial(&spec.out_path);
         return Err(format!("decoder failed: {}", decoder_text.trim()));
     }
-    let encoder_status =
-        encoder_status.map_err(|e| format!("encoder did not exit cleanly: {e}"))?;
+    let encoder_status = encoder_status.map_err(|e| {
+        remove_partial(&spec.out_path);
+        format!("encoder did not exit cleanly: {e}")
+    })?;
     if !encoder_status.success() {
         remove_partial(&spec.out_path);
         return Err(format!("encoder failed: {}", encoder_text.trim()));
@@ -694,6 +769,15 @@ mod tests {
         job.interpolation_fps = Some(60);
         assert_eq!(job.output_frames(), 1040);
         assert!((job.output_duration() - 17.333_333).abs() < 0.000_001);
+        assert_eq!(job.frame_budget(), Some(1040));
+    }
+
+    #[test]
+    fn unknown_duration_has_no_encoder_time_limit() {
+        let mut job = spec(640, 480, 2);
+        job.clip.duration = 0.0;
+        job.clip.frames = 0;
+        assert_eq!(job.frame_budget(), None);
     }
 
     #[test]
