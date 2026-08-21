@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 — RTX VSR video at exact destination
+
+- Video mode now has **Models** and **RTX VSR**. One persistent VideoSuperRes
+  session runs the clip, resets at hard cuts, and keeps NVIDIA temporal state.
+  Preview is a single-frame VSR pass; export is temporal. RIFE can still run
+  at source resolution before VSR.
+- VSR asks NVIDIA for the exact output size (ComfyUI RTX VSR Pro contract),
+  including 720p → 4K at 3×. Hybrid bicubic is only the verified 15,360px
+  16K cap. A 2× retry remains solely if this C DLL still returns -9.
+- Portrait 720-wide RGBA8 frames are padded to a 64-pixel / 256-byte pitch
+  and GPU buffers use cudaMallocPitch, fixing NVIDIA error -9
+  ("pixel format is not accommodated") on 720×1280 sources.
+- Hardware-verified on an RTX 3090: landscape 1280×720 → 3840×2160 Ultra and
+  portrait 720×1280 → 2160×3840 Ultra.
+
 ## 0.1.1 — separate playback from sample-frame upscale
 
 - Play now streams the source through one ffmpeg pipe instead of seeking a
@@ -116,20 +131,18 @@
 ## Unreleased — native NVIDIA RTX VSR image mode
 
 - Added **RTX VSR** beside Faithful and Generative in Images mode. The same
-  x2/x3/x4 scale control works with Low, Medium, High, or Ultra quality; Ultra
-  matches the supplied `RTX-VSR-PRO.json` workflow.
+  x2/x3/x4 scale control works with Low, Medium, High, or Ultra quality.
 - Integrated NVIDIA Video Super Resolution through its native Windows C API.
-  Kraken loads the optional proprietary SDK payload from `rtx-vsr/` and sends
-  RGBA8 GPU buffers directly—no ComfyUI process and no external scripting
-  runtime.
+  Kraken loads the optional proprietary SDK payload from `rtx-vsr/` and runs
+  VideoSuperRes in-process.
 - Added capability detection, explicit missing-runtime UI gating, native error
   text, preview progress, queue progress, activity-log details, lossless PNG
   export, and persisted quality selection.
 - RTX export releases Kraken's idle ONNX and RIFE sessions before creating the
   NVIDIA effect, and destroys the effect plus GPU buffers after each operation.
-- Ported the RTX-VSR-PRO safety behavior: direct VSR is capped at the verified
-  15,360px edge, exact outputs up to 16,384px use an antialiased final resize,
-  and catastrophic single-channel collapse aborts the save.
+- Direct VSR is capped at the verified 15,360px edge. Exact outputs up to
+  16,384px use an antialiased final resize, and catastrophic single-channel
+  collapse aborts the save.
 - Hardware-verified ULTRA on the RTX 3090 with a native 640×360 → 1280×720
   test. The final release UI also completed the supplied 720×1280 source at
   1440×2560 in 1.0 seconds on CUDA. The 40-test default suite passes, as does

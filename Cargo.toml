@@ -1,11 +1,13 @@
 [package]
 name = "kraken-upscale"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.92"
 description = "Native AI video upscaler"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/krakenunbound/kraken-upscale"
+homepage = "https://github.com/krakenunbound/kraken-upscale"
 
 [dependencies]
 slint = { version = "1.17", features = ["unstable-winit-030"] }

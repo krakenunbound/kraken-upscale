@@ -82,6 +82,18 @@ const SAMPLE_AFTER_PAUSE_MS: u64 = 2000;
 /// Scrub idle: much shorter; they already chose a frame.
 const SAMPLE_AFTER_SCRUB_MS: u64 = 400;
 
+fn rtx_placeholder_model() -> upscale::ModelEntry {
+    upscale::ModelEntry {
+        name: "RTX VSR".into(),
+        file: String::new(),
+        fp16_file: None,
+        scale: 1,
+        architecture: "nvidia-vsr".into(),
+        temporal_frames: 1,
+        video_tuned: true,
+    }
+}
+
 fn recommended_tile() -> u32 {
     match gpu::stats().map(|s| s.vram_total_gb()) {
         // Measured on the target RTX 3090: 896px was 44% faster than 512px
@@ -120,6 +132,7 @@ struct Job {
     stability: bool,
     lock_strength: f32,
     cut_detect: f32,
+    rtx_quality: Option<rtx_vsr::Quality>,
 }
 
 #[derive(Clone)]
@@ -152,6 +165,7 @@ enum ExportCommand {
 impl TaskSpec {
     fn kind(&self) -> &'static str {
         match self {
+            Self::Video(spec) if spec.rtx_quality.is_some() => "RTX VSR VIDEO",
             Self::Video(_) => "VIDEO UPSCALE",
             Self::Image(_) => "IMAGE UPSCALE",
             Self::Generative(_) => "GENERATIVE UPSCALE",
@@ -170,6 +184,7 @@ impl TaskSpec {
 
     fn model(&self) -> Option<&upscale::ModelEntry> {
         match self {
+            Self::Video(spec) if spec.rtx_quality.is_some() => None,
             Self::Video(spec) => Some(&spec.model),
             Self::Image(spec) => Some(&spec.model),
             Self::Generative(spec) => Some(&spec.conventional.model),
@@ -179,6 +194,7 @@ impl TaskSpec {
 
     fn fp16(&self) -> Option<bool> {
         match self {
+            Self::Video(spec) if spec.rtx_quality.is_some() => None,
             Self::Video(spec) => Some(spec.fp16),
             Self::Image(spec) => Some(spec.fp16),
             Self::Generative(spec) => Some(spec.conventional.fp16),
@@ -419,6 +435,11 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     let rtx_vsr_ready = rtx_vsr::available();
     ui.set_rtx_vsr_ready(rtx_vsr_ready);
+    ui.set_video_pipeline_index(if saved.video_pipeline_index == 1 && !rtx_vsr_ready {
+        0
+    } else {
+        saved.video_pipeline_index.clamp(0, 1)
+    });
     ui.set_image_pipeline_index(if saved.image_pipeline_index == 2 && !rtx_vsr_ready {
         0
     } else {
@@ -554,15 +575,19 @@ fn main() -> Result<(), slint::PlatformError> {
             if ui.get_mode_index() == 0 && ui.get_playing() {
                 return;
             }
+            let rtx_video = ui.get_mode_index() == 0 && ui.get_video_pipeline_index() == 1;
+            let rtx_image = ui.get_mode_index() == 1 && ui.get_image_pipeline_index() == 2;
             let selected_model = active_models
                 .borrow()
                 .get(ui.get_model_index().max(0) as usize)
                 .cloned();
-            let Some(model) = selected_model else {
+            let Some(model) = selected_model.or_else(|| {
+                (rtx_video || rtx_image).then(rtx_placeholder_model)
+            }) else {
                 return;
             };
             ui.set_model_note(upscale::guidance(&model.name).into());
-            ui.set_model_is_video(model.is_video());
+            ui.set_model_is_video(model.is_video() || rtx_video);
             ui.set_model_video_tuned(model.video_tuned);
             let target_scale = resolution::from_index(ui.get_resolution_index());
             let source_size = if ui.get_mode_index() == 1 {
@@ -580,8 +605,26 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let (output_width, output_height) =
                 resolution::dimensions(source_width, source_height, target_scale, even);
-            let working_scale =
-                match resolution::working_scale(source_width, source_height, target_scale, even) {
+            let rtx_pipeline = rtx_video || rtx_image;
+            if rtx_pipeline {
+                if let Err(error) =
+                    rtx_vsr::plan_output(source_width, source_height, output_width, output_height)
+                {
+                    ui.set_scale_note(error.clone().into());
+                    ui.set_out_badge(
+                        format!("{} × {} · unavailable", output_width, output_height).into(),
+                    );
+                    ui.set_preview_status(error.into());
+                    return;
+                }
+                ui.set_scale_note("".into());
+            } else {
+                let working_scale = match resolution::working_scale(
+                    source_width,
+                    source_height,
+                    target_scale,
+                    even,
+                ) {
                     Ok(scale) => scale,
                     Err(error) => {
                         ui.set_scale_note(error.clone().into());
@@ -592,15 +635,12 @@ fn main() -> Result<(), slint::PlatformError> {
                         return;
                     }
                 };
-            ui.set_scale_note(
-                if ui.get_mode_index() == 1 && ui.get_image_pipeline_index() == 2 {
-                    "".into()
-                } else {
+                ui.set_scale_note(
                     upscale::scale_advice(&model, working_scale, &active_models.borrow())
                         .unwrap_or_default()
-                        .into()
-                },
-            );
+                        .into(),
+                );
+            }
 
             if ui.get_mode_index() == 1 {
                 let Some(info) = still.borrow().clone() else {
@@ -679,19 +719,30 @@ fn main() -> Result<(), slint::PlatformError> {
             }
 
             let at_secs = ui.get_playhead().clamp(0.0, 1.0) as f64 * info.duration;
+            let rtx_quality = rtx_video
+                .then(|| rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index()));
             ui.set_out_badge(
                 format!(
                     "{} × {} · {}{}",
                     output_width,
                     output_height,
-                    model.name,
+                    rtx_quality
+                        .map(|quality| format!("RTX VSR {}", quality.label()))
+                        .unwrap_or_else(|| model.name.clone()),
                     interpolation_fps
                         .map(|fps| format!(" · {fps} fps RIFE"))
                         .unwrap_or_default()
                 )
                 .into(),
             );
-            ui.set_preview_status("upscaling sample frame…".into());
+            ui.set_preview_status(
+                if rtx_video {
+                    "running NVIDIA RTX VSR preview…"
+                } else {
+                    "upscaling sample frame…"
+                }
+                .into(),
+            );
 
             // Replacing the clip or changing its settings invalidates an older
             // preview even when this request must wait for an active export.
@@ -729,9 +780,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 } else {
                     SAFE_TILE
                 },
-                stability: ui.get_stability_on() && !model.is_video(),
+                stability: ui.get_stability_on() && !model.is_video() && !rtx_video,
                 lock_strength: ui.get_lock(),
                 cut_detect: ui.get_cut_detect(),
+                rtx_quality,
             });
         }
     };
@@ -1159,11 +1211,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let queue = queue.clone();
         ui.on_add_task(move || {
             let ui = handle.unwrap();
-            let Some(model) = active_models
+            let rtx_video = ui.get_mode_index() == 0 && ui.get_video_pipeline_index() == 1;
+            let rtx_image = ui.get_mode_index() == 1 && ui.get_image_pipeline_index() == 2;
+            let selected_model = active_models
                 .borrow()
                 .get(ui.get_model_index().max(0) as usize)
-                .cloned()
-            else {
+                .cloned();
+            let Some(model) = selected_model.or_else(|| {
+                (rtx_video || rtx_image).then(rtx_placeholder_model)
+            }) else {
                 return;
             };
             let target_scale = resolution::from_index(ui.get_resolution_index());
@@ -1174,12 +1230,17 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some(info) = still.borrow().clone() else {
                     return;
                 };
-                if let Err(error) = resolution::working_scale(
-                    info.width,
-                    info.height,
-                    target_scale,
-                    false,
-                ) {
+                if ui.get_image_pipeline_index() == 2 {
+                    let (width, height) =
+                        resolution::dimensions(info.width, info.height, target_scale, false);
+                    if let Err(error) = rtx_vsr::plan_output(info.width, info.height, width, height)
+                    {
+                        ui.set_preview_status(error.into());
+                        return;
+                    }
+                } else if let Err(error) =
+                    resolution::working_scale(info.width, info.height, target_scale, false)
+                {
                     ui.set_preview_status(error.into());
                     return;
                 }
@@ -1326,7 +1387,21 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(info) = clip.borrow().clone() else {
                 return;
             };
-            if let Err(error) =
+            if rtx_video {
+                let (width, height) =
+                    resolution::dimensions(info.width, info.height, target_scale, true);
+                if let Err(error) = rtx_vsr::plan_output(info.width, info.height, width, height) {
+                    ui.set_preview_status(error.into());
+                    return;
+                }
+                if !rtx_vsr::available() {
+                    ui.set_preview_status(
+                        "NVIDIA RTX VSR runtime missing — restore the rtx-vsr folder beside Kraken"
+                            .into(),
+                    );
+                    return;
+                }
+            } else if let Err(error) =
                 resolution::working_scale(info.width, info.height, target_scale, true)
             {
                 ui.set_preview_status(error.into());
@@ -1359,10 +1434,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 .unwrap_or_default();
             let (codec, extension, _) = video_output_options(ui.get_video_format_index());
             let cq = video_quality(ui.get_video_quality_index());
+            let rtx_quality = rtx_video
+                .then(|| rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index()));
             let candidate = info.path.with_file_name(format!(
                 "{stem}_{}_{}{fps_suffix}.{extension}",
                 resolution::label(target_scale),
-                model.name
+                rtx_quality
+                    .map(|quality| format!("RTX-VSR-{}", quality.label()))
+                    .unwrap_or_else(|| model.name.clone())
             ));
             let out_path = unique_output_path(&candidate, &queue.borrow());
 
@@ -1377,8 +1456,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     restore: ui.get_restore_index(),
                     deinterlace: ui.get_detect_fields(),
                 },
-                match_color: ui.get_match_color(),
-                stability: ui.get_stability_on() && !model.is_video(),
+                match_color: ui.get_match_color() && !rtx_video,
+                stability: ui.get_stability_on() && !model.is_video() && !rtx_video,
                 lock_strength: ui.get_lock(),
                 cut_detect: ui.get_cut_detect(),
                 interpolation_fps,
@@ -1392,14 +1471,22 @@ fn main() -> Result<(), slint::PlatformError> {
                 codec: codec.into(),
                 cq,
                 copy_audio: ui.get_audio_index() == 0,
+                rtx_quality,
             };
 
             let (ow, oh) = spec.output_size();
             let row = TaskRow {
                 name: info.file_name().into(),
                 detail: format!(
-                    "{ow}×{oh} · {} · {} fps · str {strength:.2} · lim {detail_limit:.2} · {} frames",
-                    model.name,
+                    "{ow}×{oh} · {} · {} fps · {} frames",
+                    rtx_quality
+                        .map(|quality| format!("RTX VSR {}", quality.label()))
+                        .unwrap_or_else(|| {
+                            format!(
+                                "{} · str {strength:.2} · lim {detail_limit:.2}",
+                                model.name
+                            )
+                        }),
                     spec.output_fps(),
                     spec.output_frames()
                 )
@@ -1622,7 +1709,28 @@ fn spawn_preview_worker(
             );
             let decode_started = std::time::Instant::now();
 
-            let (source, interpolation_note) =
+            let (source, interpolation_note) = if job.rtx_quality.is_some() {
+                match media::frame_at_with(
+                    &job.clip,
+                    job.at_secs,
+                    None,
+                    job.source_treatment,
+                ) {
+                    Ok(frame) => (frame, None),
+                    Err(e) => {
+                        log(&handle, format!("preview source processing failed: {e}"));
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            "source processing failed — full details are in the activity log"
+                                .into(),
+                            None,
+                        );
+                        continue;
+                    }
+                }
+            } else {
                 match decode_preview_source(&job, &mut rife_model, &handle) {
                     Ok(result) => result,
                     Err(e) => {
@@ -1637,7 +1745,8 @@ fn spawn_preview_worker(
                         );
                         continue;
                     }
-                };
+                }
+            };
             log(
                 &handle,
                 format!(
@@ -1671,6 +1780,114 @@ fn spawn_preview_worker(
             let preview_tile = job.tile.min(4096 / listed_scale).max(64);
             let (preview_output_width, preview_output_height) =
                 resolution::dimensions(source.width, source.height, job.target_scale, true);
+            if let Some(quality) = job.rtx_quality {
+                let vsr_plan = rtx_vsr::plan_output(
+                    source.width,
+                    source.height,
+                    preview_output_width,
+                    preview_output_height,
+                )
+                .ok();
+                log_step(
+                    &handle,
+                    "VIDEO PREVIEW",
+                    2,
+                    format!(
+                        "NVIDIA RTX VSR · quality {} · source {}×{} · VSR {}×{} → exact {}×{}",
+                        quality.label(),
+                        source.width,
+                        source.height,
+                        vsr_plan.map(|plan| plan.vsr_width).unwrap_or(preview_output_width),
+                        vsr_plan.map(|plan| plan.vsr_height).unwrap_or(preview_output_height),
+                        preview_output_width,
+                        preview_output_height
+                    ),
+                );
+                let result = rtx_vsr::upscale_frame(
+                    &source,
+                    preview_output_width,
+                    preview_output_height,
+                    quality,
+                );
+                match result {
+                    Ok(mut output) => {
+                        if let Some(target_fps) = job
+                            .interpolation_fps
+                            .filter(|fps| *fps as f64 > job.clip.fps)
+                        {
+                            if let Ok(neighbor) = media::frame_at_with(
+                                &job.clip,
+                                (job.at_secs + 1.0 / job.clip.fps.max(1.0))
+                                    .min(job.clip.duration.max(0.0)),
+                                None,
+                                job.source_treatment,
+                            ) {
+                                if let Ok(right) = rtx_vsr::upscale_frame(
+                                    &neighbor,
+                                    preview_output_width,
+                                    preview_output_height,
+                                    quality,
+                                ) {
+                                    match interpolate::Rife::load() {
+                                        Ok(mut rife) => {
+                                            if let Ok(mid) = rife.run(&output, &right, 0.5) {
+                                                output = mid;
+                                                log(
+                                                    &handle,
+                                                    format!(
+                                                        "VIDEO PREVIEW · RIFE {target_fps} fps after VSR · {}×{}",
+                                                        output.width, output.height
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        Err(error) => {
+                                            log(
+                                                &handle,
+                                                format!("RIFE after VSR unavailable: {error}"),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        log_step(
+                            &handle,
+                            "VIDEO PREVIEW",
+                            3,
+                            format!("VSR preview {}×{} ready", output.width, output.height),
+                        );
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            "RTX VSR preview ready".into(),
+                            Some(output),
+                        );
+                    }
+                    Err(error) => {
+                        log(
+                            &handle,
+                            format!(
+                                "RTX VSR preview failed: {error} · source {}×{} · goal {}×{} · quality {}",
+                                source.width,
+                                source.height,
+                                preview_output_width,
+                                preview_output_height,
+                                quality.label()
+                            ),
+                        );
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            format!("RTX VSR preview failed: {error}"),
+                            None,
+                        );
+                    }
+                }
+                continue;
+            }
             log_step(
                 &handle,
                 "VIDEO PREVIEW",
@@ -2204,24 +2421,12 @@ fn spawn_image_preview_worker(
                         ui.set_preview_progress(0.15);
                     }
                 });
-                let result =
-                    resolution::working_scale(source.width, source.height, job.target_scale, false)
-                        .and_then(|working_scale| {
-                            rtx_vsr::upscale_frame(&source, working_scale, quality)
-                        })
-                        .map(|output| {
-                            if (output.width, output.height)
-                                == (preview_output_width, preview_output_height)
-                            {
-                                output
-                            } else {
-                                upscale::resample(
-                                    &output,
-                                    preview_output_width,
-                                    preview_output_height,
-                                )
-                            }
-                        });
+                let result = rtx_vsr::upscale_frame(
+                    &source,
+                    preview_output_width,
+                    preview_output_height,
+                    quality,
+                );
                 match result {
                     Ok(output) => {
                         log_step(
@@ -2575,15 +2780,22 @@ fn spawn_exporter(
                         continue;
                     }
                 } else {
-                    // RTX VSR owns its native GPU context. Release any idle
-                    // ONNX/RIFE sessions first so it gets the card cleanly.
+                    // RTX VSR owns its native GPU context. Release idle ONNX
+                    // first. Keep RIFE when this video task still interpolates.
                     loaded = None;
-                    rife_model = None;
+                    let keep_rife = matches!(
+                        &spec,
+                        TaskSpec::Video(video)
+                            if video.rtx_quality.is_some() && video.interpolation_fps.is_some()
+                    );
+                    if !keep_rife {
+                        rife_model = None;
+                    }
                     log_step(
                         &handle,
                         spec.kind(),
                         1,
-                        "Release idle ONNX and RIFE sessions so RTX VSR receives available GPU memory",
+                        "Release idle ONNX so RTX VSR receives available GPU memory",
                     );
                 }
 
@@ -2647,6 +2859,30 @@ fn spawn_exporter(
                 }
 
                 let plan = match &spec {
+                    TaskSpec::Video(video) if video.rtx_quality.is_some() => format!(
+                        "Prepare decode → persistent NVIDIA VSR (temporal) → encode · {}×{} {} {} at {:.3} fps → {}×{} · {} output frames at {} fps · quality {} · RIFE {} · cut reset {:.2} · {} CQ {} · audio {}",
+                        video.clip.width,
+                        video.clip.height,
+                        video.clip.codec,
+                        video.clip.pix_fmt,
+                        video.clip.fps,
+                        video.output_size().0,
+                        video.output_size().1,
+                        video.output_frames(),
+                        video.output_fps(),
+                        video
+                            .rtx_quality
+                            .map(|quality| quality.label())
+                            .unwrap_or("Ultra"),
+                        video
+                            .interpolation_fps
+                            .map(|fps| format!("on → {fps} fps"))
+                            .unwrap_or_else(|| "off".into()),
+                        video.cut_detect,
+                        video.codec,
+                        video.cq,
+                        if video.copy_audio { "copy" } else { "none" },
+                    ),
                     TaskSpec::Video(video) => format!(
                         "Prepare decode → model → finish → encode pipeline · {}×{} {} {} at {:.3} fps → {}×{} · {} output frames at {} fps · RIFE {} · color match {} · stability {} (strength {:.2}, cut {:.2}) · tile {}px/overlap {}px · {} CQ {} · audio {}",
                         video.clip.width,
@@ -2821,10 +3057,70 @@ fn spawn_exporter(
                 };
 
                 let result = match &spec {
+                    TaskSpec::Video(video) if video.rtx_quality.is_some() => {
+                        let temp = video.interpolation_fps.is_some().then(|| {
+                            video.out_path.with_file_name(format!(
+                                "{}.rife-pass.mkv",
+                                video
+                                    .out_path
+                                    .file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                            ))
+                        });
+                        let result = (|| -> Result<Option<crate::stages::Stages>, String> {
+                            let mut vsr_spec = video.clone();
+                            if let Some(temp) = temp.as_ref() {
+                                log(
+                                    &handle,
+                                    format!(
+                                        "RTX VSR VIDEO · RIFE first pass at source size → {}",
+                                        temp.display()
+                                    ),
+                                );
+                                let rife = rife_model.as_mut().ok_or_else(|| {
+                                    "frame interpolation was enabled but RIFE was not loaded"
+                                        .to_string()
+                                })?;
+                                export::interpolate_source(
+                                    video,
+                                    rife,
+                                    temp,
+                                    cancel.clone(),
+                                    &mut on_progress,
+                                )?;
+                                rife_model = None;
+                                vsr_spec.clip = crate::media::probe(temp).map_err(|error| {
+                                    format!("could not read interpolated pass: {error}")
+                                })?;
+                                vsr_spec.interpolation_fps = None;
+                                vsr_spec.source_treatment =
+                                    crate::media::SourceTreatment::default();
+                                log(
+                                    &handle,
+                                    "RTX VSR VIDEO · RIFE released; NVIDIA VSR second pass",
+                                );
+                            }
+                            export::run(
+                                &vsr_spec,
+                                None,
+                                None,
+                                video.tile,
+                                OVERLAP,
+                                cancel.clone(),
+                                &mut on_progress,
+                            )
+                            .map(Some)
+                        })();
+                        if let Some(temp) = temp {
+                            let _ = std::fs::remove_file(temp);
+                        }
+                        result
+                    }
                     TaskSpec::Video(video) => match loaded.as_mut() {
                         Some((_, _, up)) => export::run(
                             video,
-                            up,
+                            Some(up),
                             rife_model.as_mut(),
                             video.tile,
                             OVERLAP,
@@ -3323,7 +3619,9 @@ fn log(handle: &slint::Weak<MainWindow>, msg: impl Into<String>) {
         {
             // Newest first so the open drawer shows live activity at y = 0.
             // Do not drive viewport-y: a y of content-height scrolls past every line.
-            vm.insert(0, format!("{stamp}  {msg}").into());
+            for piece in wrap_log_line(&msg, 92).into_iter().rev() {
+                vm.insert(0, format!("{stamp}  {piece}").into());
+            }
             while vm.row_count() > LOG_CAPACITY {
                 vm.remove(vm.row_count() - 1);
             }
@@ -3339,6 +3637,30 @@ fn human_duration(secs: f64) -> String {
         60..=3599 => format!("{}m {:02}s", s / 60, s % 60),
         _ => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
     }
+}
+
+fn wrap_log_line(msg: &str, width: usize) -> Vec<String> {
+    if msg.len() <= width {
+        return vec![msg.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut rest = msg;
+    while !rest.is_empty() {
+        if rest.len() <= width {
+            lines.push(rest.to_string());
+            break;
+        }
+        let take = rest
+            .char_indices()
+            .take_while(|(index, _)| *index <= width)
+            .last()
+            .map(|(index, character)| index + character.len_utf8())
+            .unwrap_or(width);
+        let (head, tail) = rest.split_at(take);
+        lines.push(head.trim_end().to_string());
+        rest = tail.trim_start();
+    }
+    lines
 }
 
 fn file_label(value: &str) -> String {
@@ -3458,6 +3780,7 @@ fn collect_settings(
         mode_index: ui.get_mode_index(),
         video_model,
         image_model,
+        video_pipeline_index: ui.get_video_pipeline_index(),
         image_pipeline_index: ui.get_image_pipeline_index(),
         rtx_vsr_quality_index: ui.get_rtx_vsr_quality_index(),
         generative_model: generative_models

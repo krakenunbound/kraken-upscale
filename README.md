@@ -21,7 +21,7 @@ interpolation, and optional FLUX generative refine.
 - Temporal lock to reduce shimmer on single-frame models
 - NVENC H.264 / H.265 to MP4 or MKV, with optional audio copy
 - PNG / JPEG / WebP still export
-- Optional NVIDIA RTX VSR for fast faithful image upscales
+- Optional NVIDIA RTX VSR for fast faithful image and video upscales
 - Optional Generative Refine (FLUX img2img) after a faithful pass
 
 Output is written **next to the source file**.

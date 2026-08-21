@@ -46,6 +46,9 @@
 
 # Local run/build logs.
 /stage-err.txt
+/.shellx-out/
+.verify-*.txt
+/_verify_*.txt
 
 # Operator notes — keep on disk, do not publish.
 /NEXT-SESSION.md

@@ -1,15 +1,14 @@
 # NVIDIA RTX VSR in Kraken
 
 Kraken's **Images → RTX VSR** option calls NVIDIA RTX Video Super Resolution
-directly. It is the native equivalent of the tested workflow:
+directly through the Video Effects C API. It is not a diffusion model or
+checkpoint pipeline. It is intended for fast, faithful enhancement with
+compression cleanup and no prompt-driven invention.
 
-```text
-Load Image → RTXVideoSuperResolution (2×, ULTRA) → Save Image
-```
-
-It is not a diffusion model, checkpoint workflow, or Ultimate SD Upscaler. It
-is intended for fast, faithful enhancement with compression cleanup and no
-prompt-driven invention.
+Kraken asks VideoSuperRes for the **exact destination**, matching ComfyUI
+RTX VSR Pro. Portrait 720-wide RGBA8 frames are padded to a 64-pixel /
+256-byte pitch first. Hybrid bicubic is only the verified 15,360px 16K cap.
+If this C DLL still returns NVIDIA error -9, the session retries at 2×.
 
 ## Runtime layout
 
@@ -38,12 +37,20 @@ These files are NVIDIA proprietary software. Download them from NVIDIA's
 Video Effects / `nvidia-vfx` distribution and keep them in `rtx-vsr/`
 beside the executable. Packaged builds must follow NVIDIA's runtime license.
 
+## Video
+
+**Video → RTX VSR** uses a persistent `VideoSuperRes` session: one effect,
+exact target size, temporal history across frames, reset at hard cuts. RIFE
+still runs first when interpolation is on. The Kraken Stability lock is
+bypassed — NVIDIA already holds temporal state.
+
 ## Controls
 
 - Output goal: HD 720p, Full HD 1080p, 2K 1440p, 4K/UHD 2160p, x2, x3, or x4.
 - Quality: Low, Medium, High, or Ultra.
-- Ultra matches the supplied `RTX-VSR-PRO.json` workflow.
-- Output: PNG, JPEG 95, or lossless WebP at the exact requested dimensions.
+- Ultra is NVIDIA's maximum-detail VSR model.
+- Images: PNG, JPEG 95, or lossless WebP at the exact requested dimensions.
+- Video: same encode options as the model path (NVENC, audio copy).
 
 For outputs whose longest edge is above 15,360px, Kraken uses a protected VSR
 intermediate and an antialiased final resize. Outputs above 16,384px are
@@ -55,7 +62,7 @@ single-channel failure from being saved.
 The native opt-in test is:
 
 ```text
-cargo test rtx_vsr::tests::hardware_smoke_processes_rgba_on_the_gpu -- --ignored
+cargo test rtx_vsr::tests::hardware_smoke_processes_rgb_on_the_gpu -- --ignored
 ```
 
 On the target RTX 3090 it processed a 640×360 RGB frame through Ultra and

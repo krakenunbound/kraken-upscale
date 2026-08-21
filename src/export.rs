@@ -6,7 +6,7 @@
 //! gigabytes of intermediate PNGs.
 
 use std::io::{BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -51,6 +51,9 @@ pub struct ExportSpec {
     pub codec: String,
     pub cq: u32,
     pub copy_audio: bool,
+    /// When set, frames go through a persistent NVIDIA VSR session instead of
+    /// an ONNX model. Temporal history is kept across frames and cleared at cuts.
+    pub rtx_quality: Option<crate::rtx_vsr::Quality>,
 }
 
 impl ExportSpec {
@@ -299,13 +302,235 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<std::process::Exit
     }
 }
 
+/// Interpolate at source resolution into `out_path`. Used so RIFE can release
+/// the GPU before NVIDIA VSR runs — both features stay on.
+pub fn interpolate_source(
+    spec: &ExportSpec,
+    rife: &mut Rife,
+    out_path: &Path,
+    cancel: Arc<AtomicBool>,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), String> {
+    let target_fps = spec
+        .interpolation_fps
+        .filter(|fps| *fps as f64 > spec.source_fps())
+        .ok_or_else(|| "interpolation target is not above the source frame rate".to_string())?;
+    let (sw, sh) = (spec.clip.width, spec.clip.height);
+    let frame_bytes = sw as usize * sh as usize * 3;
+    let total = spec.output_frames();
+
+    let mut pass = spec.clone();
+    pass.out_path = out_path.to_path_buf();
+    pass.rtx_quality = None;
+    pass.target_scale = 1;
+    pass.stability = false;
+    pass.copy_audio = true;
+
+    let mut decoder = spawn_decoder(&spec.clip, spec.source_treatment)?;
+    let mut decoder_err = decoder.stderr.take().map(drain);
+    let mut encoder = match spawn_sized_encoder(&pass, sw, sh) {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = decoder.kill();
+            let _ = decoder.wait();
+            if let Some(thread) = decoder_err.take() {
+                let _ = thread.join();
+            }
+            return Err(error);
+        }
+    };
+    let mut encoder_err = encoder.stderr.take().map(drain);
+    let teardown = |decoder: &mut Child,
+                    encoder: &mut Child,
+                    decoder_err: &mut Option<JoinHandle<String>>,
+                    encoder_err: &mut Option<JoinHandle<String>>| {
+        let _ = decoder.kill();
+        let _ = encoder.kill();
+        let _ = wait_child(decoder, Duration::from_secs(15));
+        let _ = wait_child(encoder, Duration::from_secs(15));
+        if let Some(thread) = decoder_err.take() {
+            let _ = thread.join();
+        }
+        if let Some(thread) = encoder_err.take() {
+            let _ = thread.join();
+        }
+    };
+
+    let mut src_out = match decoder.stdout.take() {
+        Some(pipe) => pipe,
+        None => {
+            teardown(
+                &mut decoder,
+                &mut encoder,
+                &mut decoder_err,
+                &mut encoder_err,
+            );
+            remove_partial(out_path);
+            return Err("decoder produced no output pipe".into());
+        }
+    };
+    let enc_stdin = match encoder.stdin.take() {
+        Some(pipe) => pipe,
+        None => {
+            teardown(
+                &mut decoder,
+                &mut encoder,
+                &mut decoder_err,
+                &mut encoder_err,
+            );
+            remove_partial(out_path);
+            return Err("encoder accepted no input pipe".into());
+        }
+    };
+    let mut enc_in = BufWriter::with_capacity(1 << 22, enc_stdin);
+    let mut buf = vec![0u8; frame_bytes];
+    let mut done = 0u64;
+
+    let result = (|| -> Result<(), String> {
+        let mut read_source = || -> Result<Option<Frame>, String> {
+            if !read_frame(&mut src_out, &mut buf)? {
+                return Ok(None);
+            }
+            Ok(Some(Frame {
+                width: sw,
+                height: sh,
+                rgb: std::mem::replace(&mut buf, vec![0u8; frame_bytes]),
+            }))
+        };
+        let mut write = |frame: &Frame| -> Result<(), String> {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("cancelled".into());
+            }
+            if let Some(limit) = spec.frame_budget() {
+                if done >= limit {
+                    return Ok(());
+                }
+            }
+            enc_in
+                .write_all(&frame.rgb)
+                .map_err(|error| format!("interpolate write failed: {error}"))?;
+            done += 1;
+            on_progress(done, total);
+            Ok(())
+        };
+
+        let Some(mut left) = read_source()? else {
+            return Err("decoder produced no frames".into());
+        };
+        let source_fps = spec.clip.fps.max(1.0);
+        let target = target_fps as f64;
+        let mut source_index = 0u64;
+        let mut output_index = 0u64;
+
+        while let Some(right) = read_source()? {
+            let interval_end = (source_index + 1) as f64 / source_fps;
+            while spec.frame_budget().is_none_or(|limit| output_index < limit)
+                && output_index as f64 / target < interval_end - 1e-9
+            {
+                let output_time = output_index as f64 / target;
+                let phase =
+                    ((output_time * source_fps) - source_index as f64).clamp(0.0, 1.0) as f32;
+                if phase <= 0.0001 {
+                    write(&left)?;
+                } else {
+                    let mut generated = rife.run(&left, &right, phase)?;
+                    if spec.match_color && !interpolate::is_scene_cut(&left, &right) {
+                        let reference = interpolate::color_reference(&left, &right, phase);
+                        generated = upscale::match_color_to_source(&generated, &reference);
+                    }
+                    write(&generated)?;
+                }
+                output_index += 1;
+            }
+            left = right;
+            source_index += 1;
+        }
+        if spec.frame_budget().is_some() {
+            while output_index < total {
+                write(&left)?;
+                output_index += 1;
+            }
+        }
+        enc_in
+            .flush()
+            .map_err(|error| format!("interpolate flush failed: {error}"))?;
+        Ok(())
+    })();
+
+    drop(enc_in);
+    let encoder_status = wait_child(&mut encoder, Duration::from_secs(30));
+    let _ = decoder.kill();
+    let _ = wait_child(&mut decoder, Duration::from_secs(15));
+    let decoder_text = decoder_err.take().and_then(|thread| thread.join().ok());
+    let encoder_text = encoder_err.take().and_then(|thread| thread.join().ok());
+    result?;
+    match encoder_status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => {
+            remove_partial(out_path);
+            Err(format!(
+                "interpolate encoder exited {status}: {}",
+                diagnostic_tail(&encoder_text.unwrap_or_default(), 6)
+            ))
+        }
+        Err(error) => {
+            remove_partial(out_path);
+            let _ = decoder_text;
+            Err(error)
+        }
+    }
+}
+
+fn spawn_sized_encoder(spec: &ExportSpec, width: u32, height: u32) -> Result<Child, String> {
+    let fps = spec.output_fps_rate();
+    let mut cmd = Command::new(media::ffmpeg());
+    quiet(&mut cmd).args(["-v", "error", "-n"]);
+    cmd.args([
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        &format!("{width}x{height}"),
+        "-r",
+        &fps,
+        "-i",
+        "pipe:0",
+    ]);
+    if spec.copy_audio {
+        cmd.arg("-i").arg(&spec.clip.path);
+        cmd.args(["-map", "0:v:0", "-map", "1:a:0?", "-c:a", "copy"]);
+    } else {
+        cmd.args(["-map", "0:v:0", "-an"]);
+    }
+    cmd.args([
+        "-c:v",
+        &spec.codec,
+        "-cq",
+        &spec.cq.to_string(),
+        "-pix_fmt",
+        "yuv420p",
+    ]);
+    if spec.out_path.extension().and_then(|ext| ext.to_str()) == Some("mp4") {
+        cmd.args(["-movflags", "+faststart"]);
+    }
+    if spec.frame_budget().is_some() {
+        cmd.arg("-t").arg(format!("{:.6}", spec.output_duration()));
+    }
+    cmd.arg(&spec.out_path);
+    cmd.stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start interpolate encoder: {error}"))
+}
+
 /// Runs an export to completion. `on_progress` receives (done, total) frames.
 ///
 /// Returns the per-stage timing breakdown so callers can log where the time
 /// went — the Phase 0 baseline the temporal lock will be measured against.
 pub fn run(
     spec: &ExportSpec,
-    up: &mut Engine,
+    mut up: Option<&mut Engine>,
     mut rife: Option<&mut Rife>,
     tile: u32,
     overlap: u32,
@@ -388,10 +613,27 @@ pub fn run(
     let mut previous: Option<(Frame, Frame)> = None;
 
     let processing = (|| -> Result<(), String> {
-        let window = up.window();
-        let apply_lock = spec.stability && window == 1;
+        let mut vsr = match spec.rtx_quality {
+            Some(quality) => {
+                let (ow, oh) = spec.output_size();
+                Some(crate::rtx_vsr::Session::open(
+                    sw, sh, ow, oh, quality, true,
+                )?)
+            }
+            None => None,
+        };
+        if vsr.is_none() && up.is_none() {
+            return Err("upscale model was not loaded".into());
+        }
+        let window = if vsr.is_some() {
+            1
+        } else {
+            up.as_ref().map(|engine| engine.window()).unwrap_or(1)
+        };
+        let apply_lock = spec.stability && window == 1 && vsr.is_none();
         let mut pending = Vec::<Frame>::with_capacity(window);
         let mut last_output: Option<Frame> = None;
+        let mut last_vsr_source: Option<Frame> = None;
 
         let mut write_frame = |source: &Frame, out: Frame| -> Result<(), String> {
             if cancel.load(Ordering::Relaxed) {
@@ -403,15 +645,25 @@ pub fn run(
                 }
             }
             let mut final_frame = stages.post(|| {
-                let colored = if spec.match_color {
-                    upscale::match_color_to_source(&out, source)
+                if spec.rtx_quality.is_some() {
+                    let (ow, oh) = spec.output_size();
+                    if (out.width, out.height) == (ow, oh) {
+                        out
+                    } else {
+                        upscale::resample(&out, ow, oh)
+                    }
                 } else {
-                    out
-                };
-                let limited = upscale::clamp_deviation(&colored, source, spec.detail_limit * 255.0);
-                let blended = upscale::blend_toward_source(&limited, source, spec.strength);
-                let (ow, oh) = spec.output_size();
-                upscale::resample(&blended, ow, oh)
+                    let colored = if spec.match_color {
+                        upscale::match_color_to_source(&out, source)
+                    } else {
+                        out
+                    };
+                    let limited =
+                        upscale::clamp_deviation(&colored, source, spec.detail_limit * 255.0);
+                    let blended = upscale::blend_toward_source(&limited, source, spec.strength);
+                    let (ow, oh) = spec.output_size();
+                    upscale::resample(&blended, ow, oh)
+                }
             });
 
             // The lock runs last, on the finished frame, so what gets held is
@@ -475,6 +727,20 @@ pub fn run(
         // together. Only this bounded window is retained, never the full clip.
         {
             let mut process_frame = |source: &Frame| -> Result<(), String> {
+                if let Some(session) = vsr.as_mut() {
+                    if last_vsr_source
+                        .as_ref()
+                        .is_some_and(|previous| {
+                            interpolate::is_scene_cut_with(previous, source, spec.cut_detect)
+                        })
+                    {
+                        session.reset_shot()?;
+                    }
+                    let output = stages.model(|| session.enhance(source))?;
+                    last_vsr_source = Some(source.clone());
+                    return write_frame(source, output);
+                }
+
                 // Never allow recurrent features from one shot to enter the next.
                 // Close and pad the current window before a hard edit, then begin a
                 // fresh temporal context with the new shot.
@@ -492,7 +758,9 @@ pub fn run(
                         pending.push(last.clone());
                     }
                     let outputs =
-                        stages.model(|| up.run_batch(&pending, tile, overlap, &mut nothing))?;
+                        stages.model(|| up.as_mut()
+                            .ok_or_else(|| "upscale model was not loaded".to_string())?
+                            .run_batch(&pending, tile, overlap, &mut nothing))?;
                     for (prior, output) in pending
                         .iter()
                         .take(real)
@@ -510,7 +778,9 @@ pub fn run(
                     return Err("cancelled".into());
                 }
                 let outputs =
-                    stages.model(|| up.run_batch(&pending, tile, overlap, &mut nothing))?;
+                    stages.model(|| up.as_mut()
+                            .ok_or_else(|| "upscale model was not loaded".to_string())?
+                            .run_batch(&pending, tile, overlap, &mut nothing))?;
                 if outputs.len() != pending.len() {
                     return Err(format!(
                         "detail model returned {} frames for a {}-frame window",
@@ -607,7 +877,9 @@ pub fn run(
             while pending.len() < window {
                 pending.push(last.clone());
             }
-            let outputs = stages.model(|| up.run_batch(&pending, tile, overlap, &mut nothing))?;
+            let outputs = stages.model(|| up.as_mut()
+                            .ok_or_else(|| "upscale model was not loaded".to_string())?
+                            .run_batch(&pending, tile, overlap, &mut nothing))?;
             for (source, output) in pending
                 .iter()
                 .take(real)
@@ -750,6 +1022,7 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 19,
             copy_audio: true,
+            rtx_quality: None,
         }
     }
 
@@ -855,11 +1128,12 @@ mod tests {
                 codec: "h264_nvenc".into(),
                 cq: 19,
                 copy_audio: true,
+                rtx_quality: None,
             };
             let wall = std::time::Instant::now();
             let stages = run(
                 &spec,
-                &mut up,
+                Some(&mut up),
                 None,
                 spec.tile,
                 16,
@@ -938,12 +1212,13 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 19,
             copy_audio: true,
+            rtx_quality: None,
         };
 
         let wall = std::time::Instant::now();
         let stages = run(
             &spec,
-            &mut up,
+            Some(&mut up),
             None,
             spec.tile,
             16,
@@ -1038,11 +1313,12 @@ mod tests {
                 codec: "h264_nvenc".into(),
                 cq: 19,
                 copy_audio: true,
+                rtx_quality: None,
             };
             let started = std::time::Instant::now();
             let stages = run(
                 &spec,
-                &mut up,
+                Some(&mut up),
                 None,
                 spec.tile,
                 16,
@@ -1172,10 +1448,11 @@ mod tests {
                 codec: "h264_nvenc".into(),
                 cq: 19,
                 copy_audio: true,
+                rtx_quality: None,
             };
             run(
                 &spec,
-                &mut up,
+                Some(&mut up),
                 Some(&mut rife),
                 spec.tile,
                 16,
@@ -1256,11 +1533,12 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 23,
             copy_audio: true,
+            rtx_quality: None,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         run(
             &spec,
-            &mut up,
+            Some(&mut up),
             Some(&mut rife),
             256,
             16,
@@ -1332,10 +1610,11 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 23,
             copy_audio: true,
+            rtx_quality: None,
         };
         run(
             &spec,
-            &mut engine,
+            Some(&mut engine),
             None,
             256,
             16,

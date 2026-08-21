@@ -73,6 +73,7 @@ export component MainWindow inherits Window {
     in property <[string]> generative-model-names: ["(no complete generative packages)"];
     in property <bool> generative-runtime-ready: false;
     in property <bool> rtx-vsr-ready: false;
+    in-out property <int> video-pipeline-index: 0;
     in-out property <int> image-pipeline-index: 0;
     in-out property <int> rtx-vsr-quality-index: 3;
     in-out property <int> generative-model-index: 0;
@@ -380,13 +381,12 @@ export component MainWindow inherits Window {
 
                                     for line in root.log-lines: Text {
                                         width: 100%;
-                                        height: 18px;
+                                        wrap: word-wrap;
                                         text: line;
                                         color: Pal.text;
                                         font-size: 10.5px;
                                         font-family: Pal.mono;
-                                        overflow: elide;
-                                        vertical-alignment: center;
+                                        vertical-alignment: top;
                                     }
                                 }
                             }
@@ -866,7 +866,7 @@ export component MainWindow inherits Window {
                             x: 12px;
                             y: parent.height - 34px;
                             width: Math.min(stage.width - 120px, 460px);
-                            height: 24px;
+                            height: 36px;
                             background: Pal.panel;
                             border-width: 1px;
                             border-color: Pal.line;
@@ -894,6 +894,7 @@ export component MainWindow inherits Window {
                                 font-size: 10.5px;
                                 font-family: Pal.mono;
                                 vertical-alignment: center;
+                                wrap: word-wrap;
                                 overflow: elide;
                             }
                         }
@@ -1643,6 +1644,29 @@ export component MainWindow inherits Window {
                                         text: "The bundled GPU runtime is required for preview and upscaling; missing GPU support is reported instead of silently rendering very slowly.";
                                     }
 
+                                    if root.mode-index == 0: HorizontalLayout {
+                                        spacing: 6px;
+                                        SegBtn {
+                                            text: "Models";
+                                            active: root.video-pipeline-index == 0;
+                                            horizontal-stretch: 1;
+                                            clicked => {
+                                                root.video-pipeline-index = 0;
+                                                root.settings-changed();
+                                            }
+                                        }
+                                        SegBtn {
+                                            text: "RTX VSR";
+                                            enabled: root.rtx-vsr-ready;
+                                            active: root.video-pipeline-index == 1;
+                                            horizontal-stretch: 1;
+                                            clicked => {
+                                                root.video-pipeline-index = 1;
+                                                root.settings-changed();
+                                            }
+                                        }
+                                    }
+
                                     if root.mode-index == 1: HorizontalLayout {
                                         spacing: 6px;
                                         SegBtn {
@@ -1676,7 +1700,8 @@ export component MainWindow inherits Window {
                                     }
 
                                     FieldRow {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         text: "Model";
                                         accent: true;
                                         items: root.model-names;
@@ -1685,7 +1710,8 @@ export component MainWindow inherits Window {
                                     }
 
                                     HorizontalLayout {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         spacing: 7px;
                                         Text {
                                             text: "?";
@@ -1702,7 +1728,8 @@ export component MainWindow inherits Window {
                                     }
 
                                     SliderRow {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         text: "Strength";
                                         value <=> root.strength;
                                         // Re-render on release, not on every
@@ -1711,21 +1738,24 @@ export component MainWindow inherits Window {
                                     }
 
                                     Help {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         lines: 2;
                                         text: "Flat blend toward the source. Softens everything "
                                             + "equally, including detail you wanted.";
                                     }
 
                                     SliderRow {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         text: "Detail limit";
                                         value <=> root.detail-limit;
                                         released => { root.settings-changed(); }
                                     }
 
                                     Help {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         lines: 3;
                                         text: "Caps how far a pixel may move from the source. "
                                             + "Removes invented structure (freckles drawn as "
@@ -1733,7 +1763,8 @@ export component MainWindow inherits Window {
                                     }
 
                                     CheckRow {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         text: "Half precision (FP16)";
                                         hint: "Uses a compatible FP16 model when available. Speedup is model- and tile-dependent.";
                                         checked <=> root.fp16;
@@ -1741,21 +1772,25 @@ export component MainWindow inherits Window {
                                     }
 
                                     CheckRow {
-                                        visible: root.mode-index != 1 || root.image-pipeline-index != 2;
+                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
+                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
                                         text: "Auto tile size";
                                         hint: "Uses a larger tile on high-VRAM GPUs. Disable for the conservative 256px tile.";
                                         checked <=> root.auto-tile;
                                         toggled(v) => { root.settings-changed(); }
                                     }
 
-                                    if root.mode-index == 1 && root.image-pipeline-index == 2: VerticalLayout {
+                                    if (root.mode-index == 1 && root.image-pipeline-index == 2)
+                                        || (root.mode-index == 0 && root.video-pipeline-index == 1): VerticalLayout {
                                         spacing: 9px;
 
                                         Rectangle { height: 1px; background: Pal.line-soft; }
 
                                         Help {
                                             lines: 3;
-                                            text: "NVIDIA RTX Video Super Resolution runs directly on the GPU. It is a fast, faithful enhancement pass with no prompts, diffusion, or invented composition.";
+                                            text: root.mode-index == 0
+                                                ? "NVIDIA RTX VSR runs as a persistent video session. Frames stay in one GPU effect so temporal history can stabilize the shot. Hard cuts reset that history."
+                                                : "NVIDIA RTX Video Super Resolution runs directly on the GPU. It is a fast, faithful enhancement pass with no prompts, diffusion, or invented composition.";
                                         }
 
                                         FieldRow {
@@ -1769,7 +1804,7 @@ export component MainWindow inherits Window {
 
                                         Help {
                                             lines: 2;
-                                            text: "Ultra matches the RTX-VSR-PRO workflow. Lower modes trade some enhancement for speed.";
+                                            text: "Ultra is NVIDIA's highest-detail VSR model. The network renders the exact target size. Lower modes trade some enhancement for speed.";
                                         }
                                     }
 
@@ -1881,7 +1916,9 @@ export component MainWindow inherits Window {
                                             padding: 9px;
                                             Help {
                                                 lines: 3;
-                                                text: root.model-is-video
+                                                text: root.video-pipeline-index == 1
+                                                    ? "RTX VSR already keeps temporal history inside the NVIDIA effect. The separate frame-model lock is bypassed. History is cleared at hard cuts."
+                                                    : root.model-is-video
                                                     ? "This model consumes neighboring frames together and learns temporal detail directly. The separate frame-model lock is bypassed."
                                                     : root.model-video-tuned
                                                         ? "This model was selected for good video behavior, but it still processes one frame at a time. Stability remains available to reduce frame-to-frame shimmer."
@@ -2155,7 +2192,8 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: root.mode-index == 0 ? "CONFIGURABLE"
+                                        text: root.mode-index == 0 && root.video-pipeline-index == 1 ? "RTX VSR"
+                                            : root.mode-index == 0 ? "CONFIGURABLE"
                                             : root.image-pipeline-index == 1 ? "GENERATIVE"
                                             : root.image-pipeline-index == 2 ? "RTX VSR"
                                             : "LOSSLESS";

@@ -17,6 +17,7 @@ fn candidates() -> Vec<PathBuf> {
             out.push(dir.join("cuda"));
         }
     }
+    out.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cuda"));
     out.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/cuda"));
 
     // 2. An explicit override, for unusual installs.

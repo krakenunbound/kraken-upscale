@@ -17,6 +17,8 @@ pub struct Settings {
     pub mode_index: i32,
     pub video_model: String,
     pub image_model: String,
+    /// 0 = ONNX video models, 1 = NVIDIA RTX VSR.
+    pub video_pipeline_index: i32,
     /// 0 = faithful model-only upscale, 1 = faithful + generative tile refine.
     pub image_pipeline_index: i32,
     /// 0 = Low, 1 = Medium, 2 = High, 3 = Ultra.
@@ -78,6 +80,7 @@ impl Default for Settings {
             mode_index: 0,
             video_model: String::new(),
             image_model: String::new(),
+            video_pipeline_index: 0,
             image_pipeline_index: 0,
             rtx_vsr_quality_index: 3,
             generative_model: String::new(),
