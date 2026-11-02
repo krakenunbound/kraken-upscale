@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 — Video2X, Models tab, anime profiles, batch import
+
+- **Models tab** on the left rail lists every supported model and runtime with
+  install status, size, licence and destination folder. **Download** fetches
+  from the official source, unpacks 7z/zip archives with Windows' own tar, and
+  registers the model in `models.json`; a restart button loads new models.
+  NVIDIA RTX VSR, NanoVSR and FLUX carry step-by-step manual instructions.
+- **Video2X pipeline** beside Models and RTX VSR: Real-ESRGAN, Real-CUGAN
+  (SE/Pro, every denoise level) and Anime4K presets through the Video2X 6.4
+  runtime in `video2x/`. Kraken prepares the source (fields, pixel aspect,
+  restore, RIFE), then resizes and encodes to the exact goal. Single-frame
+  preview uses the same weights.
+- **Anime source profiles**: remaster / Blu-ray, DVD / TV broadcast (inverse
+  telecine + DVD deblock) and modern digital. Choosing one selects the best
+  installed anime model and faithful line-art settings.
+- **Real-CUGAN Pro Conservative 3x** in the catalog: native 3x for 1080p →
+  4K-class animation through Kraken's feathered tiling, with no final resize.
+- **Batch import**: drop several files or use **Add Files…**; they are sorted
+  naturally, queued with the current settings, and the first is previewed.
+- **Clip strip** under the preview shows a card per file (thumbnail, name,
+  length); click to preview, ✕ to remove. Batch rows have their own remove
+  button, and **Clear All** empties batch, strip and preview together.
+- Draggable splitter between preview and batch list; its height is remembered.
+- **AAC 320k audio** option so MP4 output imports cleanly into editors that
+  reject AC3/DTS.
+- Optional **16:9 crop** (Frame control) applied before the upscale, with an
+  adjustable vertical position.
+- MCP control server for agents (`MCP/`, `src/mcp.rs`).
+
 ## 0.2.0 — RTX VSR video at exact destination
 
 - Video mode now has **Models** and **RTX VSR**. One persistent VideoSuperRes

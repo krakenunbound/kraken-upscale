@@ -17,12 +17,14 @@ pub struct Settings {
     pub mode_index: i32,
     pub video_model: String,
     pub image_model: String,
-    /// 0 = ONNX video models, 1 = NVIDIA RTX VSR.
+    /// 0 = ONNX video models, 1 = NVIDIA RTX VSR, 2 = Video2X.
     pub video_pipeline_index: i32,
     /// 0 = faithful model-only upscale, 1 = faithful + generative tile refine.
     pub image_pipeline_index: i32,
     /// 0 = Low, 1 = Medium, 2 = High, 3 = Ultra.
     pub rtx_vsr_quality_index: i32,
+    /// Video2X preset label, by name for the same reason as `model`.
+    pub video2x_preset: String,
     pub generative_model: String,
     pub generative_prompt: String,
     pub generative_denoise: f32,
@@ -42,6 +44,12 @@ pub struct Settings {
 
     pub content_index: i32,
     pub restore_index: i32,
+    /// 0 = original shape, 1 = crop to 16:9.
+    pub frame_index: i32,
+    /// Batch list height in logical pixels, set by the splitter.
+    pub batch_height: f32,
+    /// Vertical placement of a 16:9 crop, 0 top · 0.5 centre · 1 bottom.
+    pub crop_position: f32,
     pub detect_fields: bool,
     pub preserve_grain: bool,
     pub match_color: bool,
@@ -83,6 +91,7 @@ impl Default for Settings {
             video_pipeline_index: 0,
             image_pipeline_index: 0,
             rtx_vsr_quality_index: 3,
+            video2x_preset: String::new(),
             generative_model: String::new(),
             generative_prompt: "high detail, faithful textures, preserve composition".into(),
             generative_denoise: 0.10,
@@ -98,6 +107,9 @@ impl Default for Settings {
 
             content_index: 0,
             restore_index: 0,
+            frame_index: 0,
+            batch_height: 150.0,
+            crop_position: 0.5,
             detect_fields: false,
             preserve_grain: false,
             match_color: true,

@@ -15,6 +15,13 @@ interpolation, and optional FLUX generative refine.
 ## What it does
 
 - Video and still-image modes in one app
+- **Models tab**: one-click download of every supported model and runtime into
+  the right folder, with instructions for the few that need a vendor download
+- Video pipelines: ONNX **Models**, NVIDIA **RTX VSR**, or **Video2X**
+  (Real-ESRGAN / Real-CUGAN / Anime4K)
+- Anime source profiles (remaster, DVD / TV broadcast, modern digital)
+- Batch import by drag-and-drop or **Add Files…**, with a clip strip and
+  per-item remove
 - Named output goals (720p through 4K) or ×2 / ×3 / ×4
 - Fast single-frame video models plus true multi-frame models (NanoVSR)
 - RIFE interpolation to 48 / 60 / 120 fps
@@ -47,6 +54,10 @@ Run `target\release\kraken-upscale.exe`. A portable copy can be named
 `cuda\`, `rtx-vsr\`, and `native-diffusion\`.
 
 ## Models
+
+The easiest route is the **MODELS** tab on the left rail: each card shows
+whether the model is installed and downloads it into the correct folder for
+you. The tables below are the same catalog for manual installs.
 
 Kraken does not ship weights. Drop ordinary `.onnx` or RRDBNet `.pth` files
 into the folders below (next to the exe, or in this repo while developing).

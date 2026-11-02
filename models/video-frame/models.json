@@ -1,65 +1,73 @@
 [
   {
-    "name": "Real-ESRGAN General x4v3",
+    "architecture": "SRVGGNetCompact",
     "file": "realesr-general-x4v3.onnx",
+    "name": "Real-ESRGAN General x4v3",
     "scale": 4,
-    "architecture": "SRVGGNetCompact",
     "temporal_frames": 1,
     "video_tuned": true
   },
   {
-    "name": "Real-ESRGAN AnimeVideo v3",
+    "architecture": "SRVGGNetCompact",
     "file": "realesr-animevideov3.onnx",
+    "name": "Real-ESRGAN AnimeVideo v3",
     "scale": 4,
-    "architecture": "SRVGGNetCompact",
     "temporal_frames": 1,
     "video_tuned": true
   },
   {
-    "name": "Real-CUGAN Pro Conservative",
+    "architecture": "Real-CUGAN Pro",
     "file": "real-cugan-pro-conservative-2x.onnx",
+    "name": "Real-CUGAN Pro Conservative",
     "scale": 2,
-    "architecture": "Real-CUGAN Pro",
     "temporal_frames": 1,
     "video_tuned": true
   },
   {
-    "name": "Real-CUGAN Pro Denoise 3",
+    "architecture": "Real-CUGAN Pro",
     "file": "real-cugan-pro-denoise3x-2x.onnx",
+    "name": "Real-CUGAN Pro Denoise 3",
     "scale": 2,
-    "architecture": "Real-CUGAN Pro",
     "temporal_frames": 1,
     "video_tuned": true
   },
   {
-    "name": "AniSD General SPAN",
+    "architecture": "SPAN",
     "file": "2x-AniSD-General-SPAN.onnx",
+    "name": "AniSD General SPAN",
     "scale": 2,
-    "architecture": "SPAN",
     "temporal_frames": 1,
     "video_tuned": true
   },
   {
-    "name": "AniSD Cel SPAN",
+    "architecture": "SPAN",
     "file": "2x-AniSD-Cel-SPAN.onnx",
+    "name": "AniSD Cel SPAN",
     "scale": 2,
-    "architecture": "SPAN",
     "temporal_frames": 1,
     "video_tuned": true
   },
   {
-    "name": "OpenProteus Compact",
-    "file": "2x-OpenProteus.onnx",
-    "scale": 2,
     "architecture": "Compact",
+    "file": "2x-OpenProteus.onnx",
+    "name": "OpenProteus Compact",
+    "scale": 2,
     "temporal_frames": 1,
     "video_tuned": true
   },
   {
-    "name": "ModernSpanimation V1",
-    "file": "2x-ModernSpanimationV1.onnx",
-    "scale": 2,
     "architecture": "SPAN",
+    "file": "2x-ModernSpanimationV1.onnx",
+    "name": "ModernSpanimation V1",
+    "scale": 2,
+    "temporal_frames": 1,
+    "video_tuned": true
+  },
+  {
+    "architecture": "Real-CUGAN Pro",
+    "file": "real-cugan-pro-conservative-3x.onnx",
+    "name": "Real-CUGAN Pro Conservative 3x",
+    "scale": 3,
     "temporal_frames": 1,
     "video_tuned": true
   }

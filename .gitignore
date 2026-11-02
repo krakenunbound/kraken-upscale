@@ -9,6 +9,7 @@
 /.native-staging/
 /native-diffusion/
 /rtx-vsr/
+/video2x/
 /models/generative/**/*.safetensors
 /models/generative/**/*.sft
 /models/generative/**/*.gguf
@@ -49,6 +50,12 @@
 /.shellx-out/
 .verify-*.txt
 /_verify_*.txt
+/MCP/.venv/
+/MCP/**/__pycache__/
+/MCP/*.local.json
+/MCP/*.local.toml
+/MCP/.smoke-output/
+/MCP/*-launch.log
 
 # Operator notes — keep on disk, do not publish.
 /NEXT-SESSION.md

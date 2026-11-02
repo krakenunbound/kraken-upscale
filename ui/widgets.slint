@@ -105,6 +105,19 @@ export component SearchGlyph inherits Path {
     fill: transparent;
 }
 
+// Drawn rather than typed: the UI font has no ✕ (U+2715).
+export component CloseGlyph inherits Path {
+    in property <color> tint: Pal.text;
+    width: 9px;
+    height: 9px;
+    viewbox-width: 9;
+    viewbox-height: 9;
+    commands: "M 0.8 0.8 L 8.2 8.2 M 8.2 0.8 L 0.8 8.2";
+    stroke: root.tint;
+    stroke-width: 1.8px;
+    fill: transparent;
+}
+
 export component GearGlyph inherits Path {
     in property <color> tint: Pal.text-dim;
     width: 14px;
@@ -629,12 +642,14 @@ export component SectionHeader inherits Rectangle {
 export component VTab inherits Rectangle {
     in property <[string]> letters;
     in property <bool> active: false;
+    in property <bool> connected: false;
     callback clicked();
 
     width: 24px;
     height: root.letters.length * 13px + 14px;
     border-radius: 3px;
-    background: root.active ? Pal.accent-deep
+    background: root.connected ? #123d2a
+              : root.active ? Pal.accent-deep
               : ta.has-hover ? Pal.card
               : transparent;
 
@@ -645,7 +660,8 @@ export component VTab inherits Rectangle {
         for c in root.letters: Text {
             text: c;
             height: 13px;
-            color: root.active ? Pal.accent : (ta.has-hover ? Pal.text : Pal.text-dim);
+            color: root.connected ? Pal.ok
+                 : root.active ? Pal.accent : (ta.has-hover ? Pal.text : Pal.text-dim);
             font-size: 10.5px;
             font-weight: 700;
             horizontal-alignment: center;

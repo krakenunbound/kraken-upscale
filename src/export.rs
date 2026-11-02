@@ -51,6 +51,9 @@ pub struct ExportSpec {
     pub codec: String,
     pub cq: u32,
     pub copy_audio: bool,
+    /// With `copy_audio`, re-encode the source track to AAC instead of
+    /// copying it. AC3/DTS in MP4 is valid but many editors will not open it.
+    pub audio_aac: bool,
     /// When set, frames go through a persistent NVIDIA VSR session instead of
     /// an ONNX model. Temporal history is kept across frames and cleared at cuts.
     pub rtx_quality: Option<crate::rtx_vsr::Quality>,
@@ -165,6 +168,15 @@ fn spawn_decoder(clip: &ClipInfo, treatment: media::SourceTreatment) -> Result<C
         .map_err(|e| format!("could not start decoder: {e}"))
 }
 
+/// Codec arguments for the copied source audio track.
+pub fn audio_codec_args(spec: &ExportSpec) -> &'static [&'static str] {
+    if spec.audio_aac {
+        &["-c:a", "aac", "-b:a", "320k"]
+    } else {
+        &["-c:a", "copy"]
+    }
+}
+
 fn spawn_encoder(spec: &ExportSpec) -> Result<Child, String> {
     let (w, h) = spec.output_size();
     let fps = spec.output_fps_rate();
@@ -192,8 +204,9 @@ fn spawn_encoder(spec: &ExportSpec) -> Result<Child, String> {
         cmd.args([
             "-map", "0:v:0",
             // `?` keeps this optional — plenty of clips have no audio stream.
-            "-map", "1:a:0?", "-c:a", "copy",
+            "-map", "1:a:0?",
         ]);
+        cmd.args(audio_codec_args(spec));
     } else {
         cmd.args(["-map", "0:v:0", "-an"]);
     }
@@ -325,6 +338,8 @@ pub fn interpolate_source(
     pass.target_scale = 1;
     pass.stability = false;
     pass.copy_audio = true;
+    // The pass is an intermediate; any AAC conversion happens once, at the end.
+    pass.audio_aac = false;
 
     let mut decoder = spawn_decoder(&spec.clip, spec.source_treatment)?;
     let mut decoder_err = decoder.stderr.take().map(drain);
@@ -499,7 +514,8 @@ fn spawn_sized_encoder(spec: &ExportSpec, width: u32, height: u32) -> Result<Chi
     ]);
     if spec.copy_audio {
         cmd.arg("-i").arg(&spec.clip.path);
-        cmd.args(["-map", "0:v:0", "-map", "1:a:0?", "-c:a", "copy"]);
+        cmd.args(["-map", "0:v:0", "-map", "1:a:0?"]);
+        cmd.args(audio_codec_args(spec));
     } else {
         cmd.args(["-map", "0:v:0", "-an"]);
     }
@@ -728,12 +744,9 @@ pub fn run(
         {
             let mut process_frame = |source: &Frame| -> Result<(), String> {
                 if let Some(session) = vsr.as_mut() {
-                    if last_vsr_source
-                        .as_ref()
-                        .is_some_and(|previous| {
-                            interpolate::is_scene_cut_with(previous, source, spec.cut_detect)
-                        })
-                    {
+                    if last_vsr_source.as_ref().is_some_and(|previous| {
+                        interpolate::is_scene_cut_with(previous, source, spec.cut_detect)
+                    }) {
                         session.reset_shot()?;
                     }
                     let output = stages.model(|| session.enhance(source))?;
@@ -757,10 +770,11 @@ pub fn run(
                     while pending.len() < window {
                         pending.push(last.clone());
                     }
-                    let outputs =
-                        stages.model(|| up.as_mut()
+                    let outputs = stages.model(|| {
+                        up.as_mut()
                             .ok_or_else(|| "upscale model was not loaded".to_string())?
-                            .run_batch(&pending, tile, overlap, &mut nothing))?;
+                            .run_batch(&pending, tile, overlap, &mut nothing)
+                    })?;
                     for (prior, output) in pending
                         .iter()
                         .take(real)
@@ -777,10 +791,11 @@ pub fn run(
                 if cancel.load(Ordering::Relaxed) {
                     return Err("cancelled".into());
                 }
-                let outputs =
-                    stages.model(|| up.as_mut()
-                            .ok_or_else(|| "upscale model was not loaded".to_string())?
-                            .run_batch(&pending, tile, overlap, &mut nothing))?;
+                let outputs = stages.model(|| {
+                    up.as_mut()
+                        .ok_or_else(|| "upscale model was not loaded".to_string())?
+                        .run_batch(&pending, tile, overlap, &mut nothing)
+                })?;
                 if outputs.len() != pending.len() {
                     return Err(format!(
                         "detail model returned {} frames for a {}-frame window",
@@ -877,9 +892,11 @@ pub fn run(
             while pending.len() < window {
                 pending.push(last.clone());
             }
-            let outputs = stages.model(|| up.as_mut()
-                            .ok_or_else(|| "upscale model was not loaded".to_string())?
-                            .run_batch(&pending, tile, overlap, &mut nothing))?;
+            let outputs = stages.model(|| {
+                up.as_mut()
+                    .ok_or_else(|| "upscale model was not loaded".to_string())?
+                    .run_batch(&pending, tile, overlap, &mut nothing)
+            })?;
             for (source, output) in pending
                 .iter()
                 .take(real)
@@ -983,6 +1000,9 @@ mod tests {
             coded_height: height,
             width,
             height,
+            full_width: width,
+            full_height: height,
+            crop: None,
             sample_aspect_ratio: "1:1".into(),
             fps_rate: "24/1".into(),
             fps: 24.0,
@@ -1022,6 +1042,7 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 19,
             copy_audio: true,
+            audio_aac: false,
             rtx_quality: None,
         }
     }
@@ -1128,6 +1149,7 @@ mod tests {
                 codec: "h264_nvenc".into(),
                 cq: 19,
                 copy_audio: true,
+                audio_aac: false,
                 rtx_quality: None,
             };
             let wall = std::time::Instant::now();
@@ -1212,6 +1234,7 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 19,
             copy_audio: true,
+            audio_aac: false,
             rtx_quality: None,
         };
 
@@ -1313,6 +1336,7 @@ mod tests {
                 codec: "h264_nvenc".into(),
                 cq: 19,
                 copy_audio: true,
+                audio_aac: false,
                 rtx_quality: None,
             };
             let started = std::time::Instant::now();
@@ -1448,6 +1472,7 @@ mod tests {
                 codec: "h264_nvenc".into(),
                 cq: 19,
                 copy_audio: true,
+                audio_aac: false,
                 rtx_quality: None,
             };
             run(
@@ -1533,6 +1558,7 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 23,
             copy_audio: true,
+            audio_aac: false,
             rtx_quality: None,
         };
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1610,6 +1636,7 @@ mod tests {
             codec: "h264_nvenc".into(),
             cq: 23,
             copy_audio: true,
+            audio_aac: false,
             rtx_quality: None,
         };
         run(

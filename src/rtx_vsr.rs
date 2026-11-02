@@ -145,13 +145,7 @@ pub fn plan_output(
     output_width: u32,
     output_height: u32,
 ) -> Result<DimensionPlan, String> {
-    plan_output_inner(
-        input_width,
-        input_height,
-        output_width,
-        output_height,
-        None,
-    )
+    plan_output_inner(input_width, input_height, output_width, output_height, None)
 }
 
 fn plan_output_inner(
@@ -338,7 +332,11 @@ impl Session {
             let scale_y = enhanced.height as f32 / working.height as f32;
             let crop_w = ((source.width as f32 * scale_x).round() as u32).max(1);
             let crop_h = ((source.height as f32 * scale_y).round() as u32).max(1);
-            enhanced = crop_frame(&enhanced, crop_w.min(enhanced.width), crop_h.min(enhanced.height));
+            enhanced = crop_frame(
+                &enhanced,
+                crop_w.min(enhanced.width),
+                crop_h.min(enhanced.height),
+            );
         }
         assert_channel_integrity(source, &enhanced)?;
         if (enhanced.width, enhanced.height) != (self.plan.output_width, self.plan.output_height) {
@@ -412,7 +410,10 @@ impl Session {
                 (self.api.set_stream)(self.effect, c"CudaStream".as_ptr(), std::ptr::null_mut()),
                 "setting RTX VSR CUDA stream",
             )?;
-            self.api.check((self.api.load_effect)(self.effect), "loading NVIDIA VideoSuperRes")
+            self.api.check(
+                (self.api.load_effect)(self.effect),
+                "loading NVIDIA VideoSuperRes",
+            )
         })();
         if result.is_err() {
             self.destroy_effect();
@@ -569,11 +570,7 @@ fn pad_to_alignment(source: &Frame) -> Frame {
             rgb[dst..dst + 3].copy_from_slice(&source.rgb[src..src + 3]);
         }
     }
-    Frame {
-        width,
-        height,
-        rgb,
-    }
+    Frame { width, height, rgb }
 }
 
 fn crop_frame(source: &Frame, width: u32, height: u32) -> Frame {
@@ -592,11 +589,7 @@ fn crop_frame(source: &Frame, width: u32, height: u32) -> Frame {
         let dst = y * width as usize * 3;
         rgb[dst..dst + copy_w * 3].copy_from_slice(&source.rgb[src..src + copy_w * 3]);
     }
-    Frame {
-        width,
-        height,
-        rgb,
-    }
+    Frame { width, height, rgb }
 }
 
 fn assert_channel_integrity(source: &Frame, output: &Frame) -> Result<(), String> {
@@ -650,11 +643,7 @@ fn unpack_rgba8(rgba: &[u8], width: u32, height: u32) -> Result<Frame, String> {
     for pixel in rgba.chunks_exact(4).take(n) {
         rgb.extend_from_slice(&pixel[..3]);
     }
-    Ok(Frame {
-        width,
-        height,
-        rgb,
-    })
+    Ok(Frame { width, height, rgb })
 }
 
 /// Antialiased Catmull-Rom bicubic. Used only when VSR cannot emit the exact size.
@@ -735,7 +724,11 @@ fn sample_bicubic(src: &Frame, x: f32, y: f32, scale_x: f32, scale_y: f32) -> [f
     if weight_sum <= f32::EPSILON {
         return [0.0, 0.0, 0.0];
     }
-    [acc[0] / weight_sum, acc[1] / weight_sum, acc[2] / weight_sum]
+    [
+        acc[0] / weight_sum,
+        acc[1] / weight_sum,
+        acc[2] / weight_sum,
+    ]
 }
 
 #[repr(C)]
@@ -1031,7 +1024,9 @@ mod tests {
         let first = session.enhance(&frame(10)).expect("first frame");
         let second = session.enhance(&frame(40)).expect("second frame");
         session.reset_shot().expect("reset after a cut");
-        let third = session.enhance(&frame(200)).expect("first frame of next shot");
+        let third = session
+            .enhance(&frame(200))
+            .expect("first frame of next shot");
         assert_eq!((first.width, first.height), (1280, 720));
         assert_eq!((second.width, second.height), (1280, 720));
         assert_eq!((third.width, third.height), (1280, 720));
@@ -1044,8 +1039,7 @@ mod tests {
         r"C:\Users\The Kraken\Downloads\grok-video-543726d1-146a-49b5-a7c2-9f6fd2528ca2.mp4";
 
     fn user_clip_frame(at_secs: f64) -> crate::media::Frame {
-        let clip = crate::media::probe(std::path::Path::new(USER_CLIP))
-            .expect("probe user clip");
+        let clip = crate::media::probe(std::path::Path::new(USER_CLIP)).expect("probe user clip");
         crate::media::frame_at(&clip, at_secs, None).expect("decode user clip frame")
     }
 
@@ -1054,8 +1048,8 @@ mod tests {
     fn hardware_user_clip_vsr_without_rife() {
         let source = user_clip_frame(0.0);
         assert_eq!((source.width, source.height), (1280, 720));
-        let output = upscale_frame(&source, 3840, 2160, Quality::Ultra)
-            .expect("VSR user clip without RIFE");
+        let output =
+            upscale_frame(&source, 3840, 2160, Quality::Ultra).expect("VSR user clip without RIFE");
         assert_eq!((output.width, output.height), (3840, 2160));
         assert!(output.rgb.iter().any(|value| *value != 0));
     }
@@ -1095,8 +1089,8 @@ mod tests {
         let mid = rife.run(&left, &right, 0.5).expect("RIFE");
         drop(rife);
         assert_eq!((mid.width, mid.height), (1280, 720));
-        let output = upscale_frame(&mid, 3840, 2160, Quality::Ultra)
-            .expect("VSR after RIFE on user clip");
+        let output =
+            upscale_frame(&mid, 3840, 2160, Quality::Ultra).expect("VSR after RIFE on user clip");
         assert_eq!((output.width, output.height), (3840, 2160));
     }
 }

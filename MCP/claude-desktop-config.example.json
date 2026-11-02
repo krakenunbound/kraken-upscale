@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "kraken-upscale": {
+      "args": [
+        "F:\\Kraken Media\\Video Upscale\\MCP\\server.py"
+      ],
+      "command": "F:\\Kraken Media\\Video Upscale\\MCP\\.venv\\Scripts\\python.exe"
+    }
+  }
+}

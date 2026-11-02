@@ -3,9 +3,33 @@ import {
     SectionLabel, FieldLabel, Help, Mono, Card, StatusPill, Check, CheckRow,
     Btn, SegBtn, Dropdown, Slid, NumBox, SliderRow, FieldRow, SectionHeader,
     Rule, PlayGlyph, PauseGlyph, SearchGlyph, GearGlyph, SplitGlyph, Chevron,
-    StatRow, StatBox, VTab
+    StatRow, StatBox, VTab, CloseGlyph
 } from "widgets.slint";
 import { LineEdit, ScrollView } from "std-widgets.slint";
+
+export struct ModelRow {
+    name: string,
+    group: string,
+    summary: string,
+    folder: string,
+    size: string,
+    license: string,
+    status: string,
+    steps: string,
+    installed: bool,
+    manual: bool,
+    busy: bool,
+    failed: bool,
+    progress: float,
+}
+
+export struct ClipCard {
+    name: string,
+    path: string,
+    length: string,
+    thumb: image,
+    active: bool,
+}
 
 export struct TaskRow {
     name: string,
@@ -57,6 +81,8 @@ export component MainWindow inherits Window {
     // Persisted alongside the model/scale/strength above.
     in-out property <int> content-index: 0;
     in-out property <int> restore-index: 0;
+    in-out property <int> frame-index: 0;
+    in-out property <float> crop-position: 0.5;
     in-out property <bool> detect-fields: false;
     in-out property <bool> preserve-grain: false;
     in-out property <bool> match-color: true;
@@ -76,6 +102,10 @@ export component MainWindow inherits Window {
     in-out property <int> video-pipeline-index: 0;
     in-out property <int> image-pipeline-index: 0;
     in-out property <int> rtx-vsr-quality-index: 3;
+    in property <bool> video2x-ready: false;
+    in property <[string]> video2x-preset-names: [];
+    in property <[string]> video2x-preset-notes: [];
+    in-out property <int> video2x-preset-index: 2;
     in-out property <int> generative-model-index: 0;
     in-out property <string> generative-prompt: "high detail, faithful textures, preserve composition";
     in-out property <float> generative-denoise: 0.10;
@@ -83,8 +113,20 @@ export component MainWindow inherits Window {
     in-out property <int> generative-tile-index: 1;
     in-out property <bool> generative-quality-finish: true;
     in property <[TaskRow]> tasks: [];
+    in property <[ClipCard]> clips: [];
+    in property <[ModelRow]> catalog: [];
+    in property <int> models-installed: 0;
+    in property <bool> restart-needed: false;
+    // Height of the batch list; the splitter above the filmstrip trades it
+    // against the preview stage.
+    in-out property <length> batch-height: 150px;
+    property <length> batch-drag-start;
     in property <[string]> log-lines: [];
-    // Left dock: 0 = closed, 1 = logs, 2 = system.
+    in property <bool> mcp-connected: false;
+    in property <string> mcp-status: "Starting local app control…";
+    in property <string> mcp-clients: "No agents connected";
+    in property <[string]> mcp-log-lines: [];
+    // Left dock: 0 = closed, 1 = logs, 2 = system, 3 = MCP.
     in-out property <int> dock-panel: 0;
     out property <length> dock-current-width: dock.width;
 
@@ -116,7 +158,8 @@ export component MainWindow inherits Window {
     in property <int> goal-class-1080: 1;
     in property <int> goal-class-1440: 2;
     in property <int> goal-class-2160: 2;
-    in-out property <int> right-panel: -1; // -1 closed; 0 Input, 1 Enhance, 2 Motion, 3 Output
+    // Retain the settings property name for persisted-state compatibility.
+    in-out property <int> right-panel: -1; // Left settings drawer: -1 closed; 0 Input, 1 Enhance, 2 Motion, 3 Output
     in-out property <int> video-format-index: 0;
     in-out property <int> video-quality-index: 1;
     in-out property <int> audio-index: 0;
@@ -139,11 +182,11 @@ export component MainWindow inherits Window {
     // the ScrollView's own subtree would make the viewport depend on its
     // content — Slint drops that binding as cyclic and silently falls back to
     // the visible height, which is exactly what makes sections overlap.
-    property <bool> src-open: true;
-    property <bool> det-open: true;
-    property <bool> stb-open: true;
-    property <bool> fi-open: false;
-    property <bool> col-open: false;
+    in-out property <bool> src-open: true;
+    in-out property <bool> det-open: true;
+    in-out property <bool> stb-open: true;
+    in-out property <bool> fi-open: false;
+    in-out property <bool> col-open: false;
 
     property <color> goal-color-720: !root.has-clip ? Pal.text
         : root.goal-class-720 == 0 ? Pal.danger
@@ -166,6 +209,17 @@ export component MainWindow inherits Window {
     callback mode-changed(int);
     callback clear-video();
     callback clear-queue();
+    callback add-files();
+    callback content-changed(int);
+    callback model-download(int);
+    callback model-cancel(int);
+    callback model-page(int);
+    callback model-folder(int);
+    callback restart-app();
+    callback clear-all();
+    callback select-clip(int);
+    callback remove-clip(int);
+    callback remove-task(int);
     callback release-gpu-memory();
     /// Source-frame decode + idle sample. Never used as a play clock.
     callback seek(float);
@@ -276,22 +330,27 @@ export component MainWindow inherits Window {
                 spacing: 0;
                 vertical-stretch: 1;
 
-                // ══ Log dock ═════════════════════════════════════════════
+                // ══ Shared left dock ═════════════════════════════════════════════
                 // Anchored tab on the left margin, PixInsight style: the strip
                 // is always present, the panel slides out from behind it.
                 dock := Rectangle {
-                    width: 30px + (root.dock-panel != 0 ? 380px : 0px);
+                    width: 30px + (root.right-panel >= 0 ? Pal.rail-w
+                        : root.dock-panel != 0 ? 380px : 0px);
                     background: Pal.bg;
                     clip: true;
 
                     animate width { duration: 170ms; easing: ease-in-out; }
 
-                    // Always-visible tab strip. Only the tab labels rotate —
-                    // panel content stays horizontal.
-                    Rectangle {
+                    // Scroll on small windows so MCP remains reachable below Output.
+                    ScrollView {
                         x: 0;
                         width: 30px;
                         height: 100%;
+                        viewport-width: 30px;
+                        viewport-height: root.mode-index == 0 ? 694px : 587px;
+                    Rectangle {
+                        width: 30px;
+                        height: root.mode-index == 0 ? 694px : 587px;
                         background: Pal.panel;
 
                         Rectangle {
@@ -305,8 +364,9 @@ export component MainWindow inherits Window {
                             x: 3px;
                             y: 10px;
                             letters: ["L", "O", "G", "S"];
-                            active: root.dock-panel == 1;
+                            active: root.dock-panel == 1 && root.right-panel < 0;
                             clicked => {
+                                root.right-panel = -1;
                                 if (root.dock-panel == 1) {
                                     root.dock-panel = 0;
                                 } else {
@@ -328,11 +388,130 @@ export component MainWindow inherits Window {
                             x: 3px;
                             y: 92px;
                             letters: ["S", "Y", "S", "T", "E", "M"];
-                            active: root.dock-panel == 2;
+                            active: root.dock-panel == 2 && root.right-panel < 0;
                             clicked => {
+                                root.right-panel = -1;
                                 root.dock-panel = root.dock-panel == 2 ? 0 : 2;
                             }
                         }
+
+                        Rectangle {
+                            x: 7px;
+                            y: 194px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 202px;
+                            letters: ["I", "N", "P", "U", "T"];
+                            active: root.right-panel == 0;
+                            clicked => {
+                                root.dock-panel = 0;
+                                root.right-panel = root.right-panel == 0 ? -1 : 0;
+                                root.settings-changed();
+                            }
+                        }
+
+                        Rectangle {
+                            x: 7px;
+                            y: 288px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 296px;
+                            letters: ["E", "N", "H", "A", "N", "C", "E"];
+                            active: root.right-panel == 1;
+                            clicked => {
+                                root.dock-panel = 0;
+                                root.right-panel = root.right-panel == 1 ? -1 : 1;
+                                root.settings-changed();
+                            }
+                        }
+
+                        Rectangle {
+                            x: 7px;
+                            y: 408px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                            visible: root.mode-index == 0;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: 416px;
+                            letters: ["M", "O", "T", "I", "O", "N"];
+                            active: root.right-panel == 2;
+                            visible: root.mode-index == 0;
+                            clicked => {
+                                root.dock-panel = 0;
+                                root.right-panel = root.right-panel == 2 ? -1 : 2;
+                                root.settings-changed();
+                            }
+                        }
+
+                        Rectangle {
+                            x: 7px;
+                            y: root.mode-index == 0 ? 515px : 408px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+
+                        VTab {
+                            x: 3px;
+                            y: root.mode-index == 0 ? 523px : 416px;
+                            letters: ["O", "U", "T", "P", "U", "T"];
+                            active: root.right-panel == 3;
+                            clicked => {
+                                root.dock-panel = 0;
+                                root.right-panel = root.right-panel == 3 ? -1 : 3;
+                                root.settings-changed();
+                            }
+                        }
+                        Rectangle {
+                            x: 7px;
+                            y: root.mode-index == 0 ? 623px : 516px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+                        VTab {
+                            x: 3px;
+                            y: root.mode-index == 0 ? 631px : 524px;
+                            letters: ["M", "C", "P"];
+                            active: root.dock-panel == 3 && root.right-panel < 0;
+                            connected: root.mcp-connected;
+                            clicked => {
+                                root.right-panel = -1;
+                                root.dock-panel = root.dock-panel == 3 ? 0 : 3;
+                            }
+                        }
+                        Rectangle {
+                            x: 7px;
+                            y: root.mode-index == 0 ? 691px : 584px;
+                            width: 16px;
+                            height: 1px;
+                            background: Pal.line;
+                        }
+                        VTab {
+                            x: 3px;
+                            y: root.mode-index == 0 ? 699px : 592px;
+                            letters: ["M", "O", "D", "E", "L", "S"];
+                            active: root.dock-panel == 4 && root.right-panel < 0;
+                            clicked => {
+                                root.right-panel = -1;
+                                root.dock-panel = root.dock-panel == 4 ? 0 : 4;
+                            }
+                        }
+                    }
                     }
 
                     // Sliding panel.
@@ -341,13 +520,197 @@ export component MainWindow inherits Window {
                         width: 380px;
                         height: 100%;
                         background: Pal.panel;
-                        visible: root.dock-panel != 0;
+                        visible: root.dock-panel != 0 && root.right-panel < 0;
 
                         Rectangle {
                             x: parent.width - 1px;
                             width: 1px;
                             height: 100%;
                             background: Pal.line;
+                        }
+
+                        if root.dock-panel == 3: VerticalLayout {
+                            padding: 12px;
+                            padding-top: 26px;
+                            spacing: 12px;
+                            SectionLabel { text: "MCP · APP AUTOMATION"; }
+                            StatusPill {
+                                text: root.mcp-connected ? "AGENT CONNECTED" : "NO AGENT CONNECTED";
+                                dot: root.mcp-connected ? Pal.ok : Pal.text-mute;
+                            }
+                            Help { text: root.mcp-status; lines: 3; }
+                            Help { text: root.mcp-clients; lines: 4; color: Pal.text; }
+                            Rule { }
+                            SectionLabel { text: "COMMAND ACTIVITY · NEWEST FIRST"; }
+                            ScrollView {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    alignment: start;
+                                    spacing: 8px;
+                                    for line in root.mcp-log-lines: Text {
+                                        text: line;
+                                        wrap: word-wrap;
+                                        color: Pal.text;
+                                        font-family: Pal.mono;
+                                        font-size: 10.5px;
+                                    }
+                                }
+                            }
+                            Help {
+                                lines: 3;
+                                text: "Agents use this running app's controls and queue. Disconnecting an agent leaves its upscale running. Setup and skills: MCP folder beside the app.";
+                            }
+                        }
+
+                        // ── Models & runtimes ───────────────────────────
+                        if root.dock-panel == 4: VerticalLayout {
+                            padding: 10px;
+                            padding-top: 26px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                SectionLabel {
+                                    text: "MODELS & RUNTIMES";
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Mono {
+                                    text: "\{root.models-installed} / \{root.catalog.length} installed";
+                                    color: Pal.text-mute;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            Help {
+                                lines: 3;
+                                text: "Download fetches each file from its official source and puts it in the right folder. Items marked MANUAL SETUP come from vendors that require their own download page; follow the steps on the card.";
+                            }
+
+                            if root.restart-needed: Btn {
+                                text: "Restart Kraken to load new models";
+                                primary: true;
+                                height: 28px;
+                                clicked => { root.restart-app(); }
+                            }
+
+                            Rule { }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+
+                                VerticalLayout {
+                                    alignment: start;
+                                    spacing: 8px;
+                                    width: 100%;
+
+                                    for m[i] in root.catalog: Rectangle {
+                                        background: Pal.card;
+                                        border-radius: 3px;
+                                        border-width: 1px;
+                                        border-color: m.failed ? Pal.danger
+                                            : m.busy ? Pal.accent-dim : Pal.line-soft;
+
+                                        VerticalLayout {
+                                            padding: 9px;
+                                            spacing: 4px;
+
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                Text {
+                                                    text: m.name;
+                                                    color: Pal.text;
+                                                    font-size: 12px;
+                                                    font-weight: 600;
+                                                    horizontal-stretch: 1;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                                Mono {
+                                                    text: m.status;
+                                                    color: m.installed ? Pal.ok
+                                                        : m.failed ? Pal.danger
+                                                        : m.busy ? Pal.accent
+                                                        : m.manual ? Pal.warn
+                                                        : Pal.text-mute;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+
+                                            Mono {
+                                                text: m.group + (m.size == "" ? "" : " · " + m.size)
+                                                    + " · " + m.license;
+                                                color: Pal.text-mute;
+                                                overflow: elide;
+                                            }
+
+                                            Text {
+                                                text: m.summary;
+                                                wrap: word-wrap;
+                                                color: Pal.text-dim;
+                                                font-size: 10.5px;
+                                            }
+
+                                            Mono {
+                                                text: "→ " + m.folder;
+                                                color: Pal.text-mute;
+                                                overflow: elide;
+                                            }
+
+                                            if m.busy: Rectangle {
+                                                height: 4px;
+                                                border-radius: 2px;
+                                                background: Pal.line;
+                                                Rectangle {
+                                                    x: 0;
+                                                    width: parent.width * Math.clamp(m.progress, 0.0, 1.0);
+                                                    height: 100%;
+                                                    border-radius: 2px;
+                                                    background: Pal.accent;
+                                                }
+                                            }
+
+                                            if m.manual && !m.installed: Text {
+                                                text: m.steps;
+                                                wrap: word-wrap;
+                                                color: Pal.text;
+                                                font-size: 10.5px;
+                                            }
+
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                alignment: start;
+
+                                                if !m.installed && !m.manual && !m.busy: Btn {
+                                                    text: m.failed ? "Retry" : "Download";
+                                                    primary: true;
+                                                    width: 84px;
+                                                    height: 24px;
+                                                    clicked => { root.model-download(i); }
+                                                }
+                                                if m.busy: Btn {
+                                                    text: "Cancel";
+                                                    width: 70px;
+                                                    height: 24px;
+                                                    clicked => { root.model-cancel(i); }
+                                                }
+                                                Btn {
+                                                    text: m.manual && !m.installed ? "Get it" : "Page";
+                                                    width: 64px;
+                                                    height: 24px;
+                                                    clicked => { root.model-page(i); }
+                                                }
+                                                Btn {
+                                                    text: "Folder";
+                                                    width: 64px;
+                                                    height: 24px;
+                                                    clicked => { root.model-folder(i); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // ── Activity log ────────────────────────────────
@@ -486,9 +849,920 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    // ══ Settings rail ════════════════════════════════════════
+                    railpane := Rectangle {
+                        x: 30px;
+                        y: 0px;
+                        width: Pal.rail-w;
+                        height: 100%;
+                        visible: root.right-panel >= 0;
+                        background: Pal.bg;
+                        clip: true;
+
+                        // Slint's ScrollView does not derive its viewport from the
+                        // content, and a VerticalLayout given less height than it
+                        // needs overlaps its children rather than overflowing, so
+                        // the scroll height is stated outright. Values are
+                        // deliberately generous — overshooting costs a little dead
+                        // scroll space, undershooting brings the overlap back.
+                        property <length> content-h:
+                              202px
+                            + (root.right-panel == 0 ? 330px : 0px)
+                            + (root.right-panel == 1 ? 620px : 0px)
+                            + (root.right-panel == 1 && root.mode-index == 1 && root.image-pipeline-index == 1 ? 360px : 0px)
+                            + (root.right-panel == 2 ? 610px : 0px)
+                            + (root.right-panel == 3 ? 430px : 0px);
+
+                        Rectangle {
+                            x: 0;
+                            width: 100%;
+                            height: 100%;
+                            background: Pal.panel;
+                        }
+
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            height: 100%;
+                            background: Pal.line;
+                        }
+
+                        VerticalLayout {
+                            x: 0;
+                            width: Pal.rail-w;
+                            height: 100%;
+                            spacing: 0;
+                            visible: root.right-panel >= 0;
+
+                            ScrollView {
+                                vertical-stretch: 1;
+                                viewport-height: railpane.content-h;
+
+                                rail := VerticalLayout {
+                                    // `alignment: start` is load-bearing: without
+                                    // it the layout stretches to the viewport and,
+                                    // when the viewport is shorter than the
+                                    // content, compresses past its minimums and
+                                    // overlaps sections instead of scrolling.
+                                    alignment: start;
+                                    padding: 12px;
+                                    // Clear the logo's overhang above the left drawer.
+                                    padding-top: 24px;
+                                    spacing: 5px;
+
+                                    // ── Video info ──────────────────────────
+                                    SectionLabel { text: root.mode-index == 0 ? "VIDEO INFO" : "IMAGE INFO"; }
+
+                                    Card {
+                                        height: 62px;
+
+                                        HorizontalLayout {
+                                            padding: 8px;
+                                            spacing: 10px;
+
+                                            Rectangle {
+                                                width: 76px;
+                                                background: Pal.input;
+                                                border-radius: 3px;
+                                                border-width: 1px;
+                                                border-color: Pal.line-soft;
+                                                clip: true;
+
+                                                Image {
+                                                    width: 100%;
+                                                    height: 100%;
+                                                    source: root.thumb;
+                                                    image-fit: contain;
+                                                    visible: root.has-clip;
+                                                }
+                                            }
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                spacing: 3px;
+                                                horizontal-stretch: 1;
+
+                                                Text {
+                                                    text: root.has-clip ? root.clip-name
+                                                        : root.mode-index == 0 ? "No video selected"
+                                                        : "No image selected";
+                                                    color: root.has-clip ? Pal.text : Pal.text-mute;
+                                                    font-size: 11.5px;
+                                                    font-weight: 500;
+                                                    overflow: elide;
+                                                }
+
+                                                Mono {
+                                                    text: root.clip-specs;
+                                                    color: Pal.text-mute;
+                                                    visible: root.has-clip;
+                                                }
+                                            }
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Btn {
+                                                    text: "Clear";
+                                                    width: 56px;
+                                                    height: 26px;
+                                                    enabled: root.has-clip;
+                                                    clicked => { root.clear-video(); }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle { height: 3px; }
+                                    Rule { }
+
+                                    // ── Source ──────────────────────────────
+                                    SectionHeader {
+                                        title: "Source";
+                                        visible: root.mode-index == 0 && root.right-panel == 0;
+                                        gated: false;
+                                        enabled: true;
+                                        expanded <=> root.src-open;
+                                    }
+
+                                    if root.mode-index == 0 && root.right-panel == 0 && root.src-open: VerticalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-bottom: 10px;
+                                        spacing: 9px;
+
+                                        Help {
+                                            lines: 2;
+                                            text: "Source profile and restoration are applied before AI upscaling.";
+                                        }
+
+                                        FieldRow {
+                                            text: "Content";
+                                            accent: true;
+                                            enabled: root.has-clip;
+                                            current <=> root.content-index;
+                                            changed(i) => { root.content-changed(i); }
+                                            items: [
+                                                "AI generated video",
+                                                "Film / movie (24p)",
+                                                "TV — shot on film",
+                                                "TV — shot on video",
+                                                "Modern digital",
+                                                "Anime — remaster / Blu-ray",
+                                                "Anime — DVD / TV broadcast",
+                                                "Anime — modern digital",
+                                            ];
+                                        }
+
+                                        Help {
+                                            lines: 3;
+                                            text: root.content-index >= 5
+                                                ? "Anime profile: picks the best installed anime model and "
+                                                    + "faithful settings for line art. DVD / TV also recovers "
+                                                    + "24 fps film frames (inverse telecine) and deblocks."
+                                                : "Gates the automatic front-end: deinterlace runs "
+                                                    + "only on the TV profiles, and only when the source "
+                                                    + "really is interlaced. Restore below is a manual "
+                                                    + "choice and applies to every profile.";
+                                        }
+
+                                        // Raised by the probe when the source has
+                                        // real fields — the front-end has to run
+                                        // before any detail model touches it.
+                                        if root.source-note != "": Rectangle {
+                                            height: 34px;
+                                            background: #3a2410;
+                                            border-radius: 3px;
+                                            border-width: 1px;
+                                            border-color: Pal.ember;
+
+                                            Text {
+                                                x: 9px;
+                                                width: parent.width - 18px;
+                                                height: 100%;
+                                                text: root.source-note;
+                                                color: Pal.ember;
+                                                font-size: 10.5px;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            text: "Restore";
+                                            enabled: root.has-clip;
+                                            current <=> root.restore-index;
+                                            changed(i) => { root.settings-changed(); }
+                                            items: [
+                                                "None",
+                                                "Deblock — light",
+                                                "Deblock — DVD / MPEG-2",
+                                                "Dejpeg — heavy compression",
+                                            ];
+                                        }
+
+                                        FieldRow {
+                                            visible: root.mode-index == 0;
+                                            text: "Frame";
+                                            enabled: root.has-clip;
+                                            current <=> root.frame-index;
+                                            changed(i) => { root.settings-changed(); }
+                                            items: ["Original shape", "Crop to 16:9"];
+                                        }
+
+                                        SliderRow {
+                                            visible: root.mode-index == 0 && root.frame-index == 1;
+                                            text: "Crop position";
+                                            enabled: root.has-clip;
+                                            value <=> root.crop-position;
+                                            released => { root.settings-changed(); }
+                                        }
+
+                                        Help {
+                                            visible: root.mode-index == 0 && root.frame-index == 1;
+                                            lines: 3;
+                                            text: "Crops before the upscale, so the model only works on kept pixels. 4:3 loses a quarter of its height: 0 keeps the top, 0.5 the centre, 1 the bottom. The output goal applies to the cropped picture.";
+                                        }
+
+                                        CheckRow {
+                                            text: "Deinterlace detected fields";
+                                            enabled: root.has-clip && (root.content-index == 2 || root.content-index == 3
+                                                || root.content-index == 6);
+                                            checked <=> root.detect-fields;
+                                            toggled(v) => { root.settings-changed(); }
+                                        }
+
+                                        CheckRow {
+                                            text: "Preserve grain — planned";
+                                            enabled: false;
+                                            checked <=> root.preserve-grain;
+                                            toggled(v) => { root.settings-changed(); }
+                                        }
+                                    }
+
+                                    Rule { }
+
+                                    // ── Detail model ────────────────────────
+                                    // Not gated: the detail model *is* the app, so
+                                    // a checkbox to switch it off is noise.
+                                    SectionHeader {
+                                        title: "Detail Model";
+                                        visible: root.right-panel == 1;
+                                        gated: false;
+                                        enabled: true;
+                                        expanded <=> root.det-open;
+                                    }
+
+                                    if root.right-panel == 1 && root.det-open: VerticalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-bottom: 10px;
+                                        spacing: 9px;
+
+                                        Help {
+                                            lines: 2;
+                                            text: "The bundled GPU runtime is required for preview and upscaling; missing GPU support is reported instead of silently rendering very slowly.";
+                                        }
+
+                                        if root.mode-index == 0: HorizontalLayout {
+                                            spacing: 6px;
+                                            SegBtn {
+                                                text: "Models";
+                                                active: root.video-pipeline-index == 0;
+                                                horizontal-stretch: 1;
+                                                clicked => {
+                                                    root.video-pipeline-index = 0;
+                                                    root.settings-changed();
+                                                }
+                                            }
+                                            SegBtn {
+                                                text: "RTX VSR";
+                                                enabled: root.rtx-vsr-ready;
+                                                active: root.video-pipeline-index == 1;
+                                                horizontal-stretch: 1;
+                                                clicked => {
+                                                    root.video-pipeline-index = 1;
+                                                    root.settings-changed();
+                                                }
+                                            }
+                                            SegBtn {
+                                                text: "Video2X";
+                                                enabled: root.video2x-ready;
+                                                active: root.video-pipeline-index == 2;
+                                                horizontal-stretch: 1;
+                                                clicked => {
+                                                    root.video-pipeline-index = 2;
+                                                    root.settings-changed();
+                                                }
+                                            }
+                                        }
+
+                                        if root.mode-index == 1: HorizontalLayout {
+                                            spacing: 6px;
+                                            SegBtn {
+                                                text: "Faithful";
+                                                active: root.image-pipeline-index == 0;
+                                                horizontal-stretch: 1;
+                                                clicked => {
+                                                    root.image-pipeline-index = 0;
+                                                    root.settings-changed();
+                                                }
+                                            }
+                                            SegBtn {
+                                                text: "Generative";
+                                                active: root.image-pipeline-index == 1;
+                                                horizontal-stretch: 1;
+                                                clicked => {
+                                                    root.image-pipeline-index = 1;
+                                                    root.settings-changed();
+                                                }
+                                            }
+                                            SegBtn {
+                                                text: "RTX VSR";
+                                                enabled: root.rtx-vsr-ready;
+                                                active: root.image-pipeline-index == 2;
+                                                horizontal-stretch: 1;
+                                                clicked => {
+                                                    root.image-pipeline-index = 2;
+                                                    root.settings-changed();
+                                                }
+                                            }
+                                        }
+
+                                        FieldRow {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            text: "Model";
+                                            accent: true;
+                                            items: root.model-names;
+                                            current <=> root.model-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        HorizontalLayout {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            spacing: 7px;
+                                            Text {
+                                                text: "?";
+                                                color: Pal.accent;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                width: 12px;
+                                            }
+                                            Help {
+                                                lines: 3;
+                                                text: root.model-note;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+
+                                        SliderRow {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            text: "Strength";
+                                            value <=> root.strength;
+                                            // Re-render on release, not on every
+                                            // pixel of the drag.
+                                            released => { root.settings-changed(); }
+                                        }
+
+                                        Help {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            lines: 2;
+                                            text: "Flat blend toward the source. Softens everything "
+                                                + "equally, including detail you wanted.";
+                                        }
+
+                                        SliderRow {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            text: "Detail limit";
+                                            value <=> root.detail-limit;
+                                            released => { root.settings-changed(); }
+                                        }
+
+                                        Help {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            lines: 3;
+                                            text: "Caps how far a pixel may move from the source. "
+                                                + "Removes invented structure (freckles drawn as "
+                                                + "black strokes) while keeping sharpening. Try 0.2.";
+                                        }
+
+                                        CheckRow {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            text: "Half precision (FP16)";
+                                            hint: "Uses a compatible FP16 model when available. Speedup is model- and tile-dependent.";
+                                            checked <=> root.fp16;
+                                            toggled(v) => { root.settings-changed(); }
+                                        }
+
+                                        CheckRow {
+                                            visible: (root.mode-index == 0 && root.video-pipeline-index == 0)
+                                                || (root.mode-index == 1 && root.image-pipeline-index != 2);
+                                            text: "Auto tile size";
+                                            hint: "Uses a larger tile on high-VRAM GPUs. Disable for the conservative 256px tile.";
+                                            checked <=> root.auto-tile;
+                                            toggled(v) => { root.settings-changed(); }
+                                        }
+
+                                        if (root.mode-index == 1 && root.image-pipeline-index == 2)
+                                            || (root.mode-index == 0 && root.video-pipeline-index == 1): VerticalLayout {
+                                            spacing: 9px;
+
+                                            Rectangle { height: 1px; background: Pal.line-soft; }
+
+                                            Help {
+                                                lines: 3;
+                                                text: root.mode-index == 0
+                                                    ? "NVIDIA RTX VSR runs as a persistent video session. Frames stay in one GPU effect so temporal history can stabilize the shot. Hard cuts reset that history."
+                                                    : "NVIDIA RTX Video Super Resolution runs directly on the GPU. It is a fast, faithful enhancement pass with no prompts, diffusion, or invented composition.";
+                                            }
+
+                                            FieldRow {
+                                                text: "Quality";
+                                                accent: true;
+                                                enabled: root.rtx-vsr-ready;
+                                                items: ["Low", "Medium", "High", "Ultra"];
+                                                current <=> root.rtx-vsr-quality-index;
+                                                changed(i) => { root.settings-changed(); }
+                                            }
+
+                                            Help {
+                                                lines: 2;
+                                                text: "Ultra is NVIDIA's highest-detail VSR model. The network renders the exact target size. Lower modes trade some enhancement for speed.";
+                                            }
+                                        }
+
+                                        if root.mode-index == 0 && root.video-pipeline-index == 2: VerticalLayout {
+                                            spacing: 9px;
+
+                                            Rectangle { height: 1px; background: Pal.line-soft; }
+
+                                            Help {
+                                                lines: 3;
+                                                text: root.video2x-ready
+                                                    ? "Video2X runs Real-ESRGAN, Real-CUGAN (ncnn-Vulkan) or Anime4K as its own process. Kraken prepares the source, then resizes and encodes Video2X's result to the exact goal."
+                                                    : "Video2X runtime missing. Place video2x.exe, its DLLs and models/ in a video2x folder beside Kraken.";
+                                                color: root.video2x-ready ? Pal.text-mute : Pal.ember;
+                                            }
+
+                                            FieldRow {
+                                                text: "Preset";
+                                                accent: true;
+                                                enabled: root.video2x-ready;
+                                                items: root.video2x-preset-names;
+                                                current <=> root.video2x-preset-index;
+                                                changed(i) => { root.settings-changed(); }
+                                            }
+
+                                            Help {
+                                                lines: 3;
+                                                text: root.video2x-preset-notes[root.video2x-preset-index];
+                                            }
+                                        }
+
+                                        if root.mode-index == 1 && root.image-pipeline-index == 1: VerticalLayout {
+                                            spacing: 9px;
+
+                                            Rectangle { height: 1px; background: Pal.line-soft; }
+
+                                            Help {
+                                                lines: 3;
+                                                text: root.generative-runtime-ready
+                                                    ? "The faithful model runs first. A native FLUX image-to-image pass then refines overlapping tiles. The stage runs only during Upscale because it is much slower than the preview model."
+                                                    : "Native generative runtime or a complete model package is missing. Add sd-server beside the app and a manifest under models/generative/.";
+                                                color: root.generative-runtime-ready ? Pal.text-mute : Pal.ember;
+                                            }
+
+                                            FieldRow {
+                                                text: "Refiner";
+                                                accent: true;
+                                                enabled: root.generative-runtime-ready;
+                                                items: root.generative-model-names;
+                                                current <=> root.generative-model-index;
+                                                changed(i) => { root.settings-changed(); }
+                                            }
+
+                                            FieldLabel { text: "Refine prompt"; }
+                                            Rectangle {
+                                                height: 30px;
+                                                background: Pal.input;
+                                                border-width: 1px;
+                                                border-color: Pal.line;
+                                                border-radius: 3px;
+
+                                                LineEdit {
+                                                    x: 6px;
+                                                    y: 3px;
+                                                    width: parent.width - 12px;
+                                                    height: parent.height - 6px;
+                                                    text <=> root.generative-prompt;
+                                                    placeholder-text: "describe detail while preserving composition";
+                                                    accepted => { root.settings-changed(); }
+                                                }
+                                            }
+
+                                            FieldRow {
+                                                text: "Steps";
+                                                items: ["8", "15", "20", "28"];
+                                                current <=> root.generative-steps-index;
+                                                changed(i) => { root.settings-changed(); }
+                                            }
+
+                                            SliderRow {
+                                                text: "Denoise";
+                                                minimum: 0.05;
+                                                maximum: 0.40;
+                                                value <=> root.generative-denoise;
+                                                released => { root.settings-changed(); }
+                                            }
+
+                                            Help {
+                                                lines: 3;
+                                                text: "0.10 is conservative and close to Kraken Art's default. Higher values invent more detail but can change faces, text, and structure.";
+                                            }
+
+                                            FieldRow {
+                                                text: "Refine tile";
+                                                items: ["512 px", "768 px", "1024 px"];
+                                                current <=> root.generative-tile-index;
+                                                changed(i) => { root.settings-changed(); }
+                                            }
+
+                                            CheckRow {
+                                                text: "Quality finish";
+                                                hint: "Applies restrained sharpening after tile blending and source-color matching.";
+                                                hint-lines: 2;
+                                                checked <=> root.generative-quality-finish;
+                                                toggled(v) => { root.settings-changed(); }
+                                            }
+                                        }
+                                    }
+
+                                    Rule { }
+
+                                    // ── Stability (the temporal lock) ───────
+                                    SectionHeader {
+                                        title: root.video-pipeline-index == 2
+                                            ? "Stability — not used by Video2X"
+                                            : root.model-is-video
+                                            ? "Temporal consistency — built into model"
+                                            : "Stability — temporal lock";
+                                        visible: root.mode-index == 0 && root.right-panel == 2;
+                                        enabled <=> root.stability-on;
+                                        interactive: !root.model-is-video;
+                                        expanded <=> root.stb-open;
+                                        toggled(v) => { root.settings-changed(); }
+                                    }
+
+                                    if root.mode-index == 0 && root.right-panel == 2 && root.stb-open: VerticalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-bottom: 10px;
+                                        spacing: 9px;
+
+                                        Rectangle {
+                                            background: Pal.violet-deep;
+                                            border-radius: 3px;
+                                            border-width: 1px;
+                                            border-color: Pal.violet;
+
+                                            VerticalLayout {
+                                                padding: 9px;
+                                                Help {
+                                                    lines: 3;
+                                                    text: root.video-pipeline-index == 1
+                                                        ? "RTX VSR already keeps temporal history inside the NVIDIA effect. The separate frame-model lock is bypassed. History is cleared at hard cuts."
+                                                        : root.video-pipeline-index == 2
+                                                        ? "Video2X decodes and processes the clip itself, so Kraken's frame lock cannot run between its frames. Real-CUGAN and AnimeVideo v3 are steady on cel animation without it."
+                                                        : root.model-is-video
+                                                        ? "This model consumes neighboring frames together and learns temporal detail directly. The separate frame-model lock is bypassed."
+                                                        : root.model-video-tuned
+                                                            ? "This model was selected for good video behavior, but it still processes one frame at a time. Stability remains available to reduce frame-to-frame shimmer."
+                                                        : "Holds invented detail still across frames so texture stops boiling. This improves frame models but does not turn them into a learned video model.";
+                                                    color: Pal.text-dim;
+                                                }
+                                            }
+                                        }
+
+                                        SliderRow {
+                                            text: "Lock";
+                                            enabled: root.stability-on && !root.model-is-video;
+                                            value <=> root.lock;
+                                            released => { root.settings-changed(); }
+                                        }
+
+                                        SliderRow {
+                                            text: "Cut detect";
+                                            enabled: root.stability-on && !root.model-is-video;
+                                            value <=> root.cut-detect;
+                                            released => { root.settings-changed(); }
+                                        }
+
+                                        Help {
+                                            lines: 3;
+                                            text: "Higher Lock is steadier but smears fast motion. "
+                                                + "Held detail is released automatically wherever "
+                                                + "motion cannot be tracked, and reset at cuts.";
+                                        }
+
+                                        Help {
+                                            lines: 3;
+                                            text: "The preview renders the preceding frame too so "
+                                                + "this can be judged before upscaling — scrub off "
+                                                + "the first frame to see it, at roughly double the "
+                                                + "preview time.";
+                                            color: Pal.text-mute;
+                                        }
+                                    }
+
+                                    Rule { }
+
+                                    // ── Frame interpolation ─────────────────
+                                    fi-hdr := SectionHeader {
+                                        title: root.interp-available ? "Frame Interpolation — RIFE"
+                                            : "Frame Interpolation — model missing";
+                                        gated: true;
+                                        visible: root.mode-index == 0 && root.right-panel == 2;
+                                        enabled <=> root.interp-on;
+                                        interactive: root.interp-available;
+                                        expanded <=> root.fi-open;
+                                        toggled(v) => { root.settings-changed(); }
+                                    }
+
+                                    if root.mode-index == 0 && root.right-panel == 2 && root.fi-open: VerticalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-bottom: 10px;
+                                        spacing: 9px;
+
+                                        Help {
+                                            lines: 3;
+                                            text: root.interp-available
+                                                ? "RIFE synthesizes motion-aware frames between source frames. It runs before detail upscaling and increases processing time with the chosen frame rate."
+                                                : "Add RIFE_fp32_timestep.onnx to models/interpolation and restart the app.";
+                                        }
+
+                                        FieldRow {
+                                            text: "Target";
+                                            current <=> root.interp-index;
+                                            enabled: root.has-clip && root.interp-on && root.interp-available;
+                                            accent: root.interp-on;
+                                            items: ["48 fps", "60 fps", "120 fps"];
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+                                    }
+
+                                    Rule { }
+
+                                    // ── Color ───────────────────────────────
+                                    col-hdr := SectionHeader {
+                                        title: "Color";
+                                        visible: root.right-panel == 2;
+                                        gated: false;
+                                        enabled: true;
+                                        expanded <=> root.col-open;
+                                    }
+
+                                    if root.right-panel == 2 && root.col-open: VerticalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-bottom: 10px;
+                                        spacing: 9px;
+
+                                        CheckRow {
+                                            text: "Match to source";
+                                            hint: "Corrects color drift from both RIFE interpolation and detail upscaling.";
+                                            checked <=> root.match-color;
+                                            enabled: root.has-clip;
+                                            toggled(v) => { root.settings-changed(); }
+                                        }
+                                    }
+
+                                    // ── Output ──────────────────────────────
+                                    if root.right-panel == 3: VerticalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-bottom: 10px;
+                                        spacing: 10px;
+
+                                        SectionLabel { text: "OUTPUT GOAL"; }
+
+                                        FieldRow {
+                                            text: "Resolution";
+                                            accent: true;
+                                            enabled: root.has-clip;
+                                            items: [
+                                                "HD · 720p",
+                                                "Full HD · 1080p",
+                                                "2K · 1440p",
+                                                "4K / UHD · 2160p",
+                                                "Multiplier · x2",
+                                                "Multiplier · x3",
+                                                "Multiplier · x4",
+                                            ];
+                                            item-colors: [
+                                                root.goal-color-720,
+                                                root.goal-color-1080,
+                                                root.goal-color-1440,
+                                                root.goal-color-2160,
+                                                Pal.ok,
+                                                Pal.accent,
+                                                Pal.accent,
+                                            ];
+                                            current <=> root.resolution-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: 10px;
+                                            Text { text: "● Downsize"; color: Pal.danger; font-size: 9px; }
+                                            Text { text: "● Near source"; color: Pal.warn; font-size: 9px; }
+                                            Text { text: "● Upscale"; color: Pal.ok; font-size: 9px; }
+                                            Text { text: "● Large"; color: Pal.accent; font-size: 9px; }
+                                        }
+
+                                        Help {
+                                            lines: 4;
+                                            text: "Colors compare each goal with the loaded source. Near source means within 5%. Named goals preserve aspect ratio: landscape targets height and portrait targets width. x2/x3/x4 remain direct multipliers.";
+                                        }
+
+                                        if root.scale-note != "": HorizontalLayout {
+                                            spacing: 7px;
+                                            Text {
+                                                text: "!";
+                                                color: Pal.ember;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                width: 12px;
+                                            }
+                                            Help {
+                                                lines: 3;
+                                                text: root.scale-note;
+                                                color: Pal.ember;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+
+                                        Rectangle { height: 1px; background: Pal.line-soft; }
+                                        SectionLabel { text: root.mode-index == 0 ? "VIDEO FORMAT" : "IMAGE FORMAT"; }
+
+                                        FieldRow {
+                                            visible: root.mode-index == 0;
+                                            text: "Format";
+                                            items: [
+                                                "MP4 · H.264 NVENC",
+                                                "MP4 · H.265 / HEVC NVENC",
+                                                "MKV · H.264 NVENC",
+                                                "MKV · H.265 / HEVC NVENC",
+                                            ];
+                                            current <=> root.video-format-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        FieldRow {
+                                            visible: root.mode-index == 0;
+                                            text: "Quality";
+                                            items: ["Best · CQ 15", "High · CQ 19", "Balanced · CQ 23"];
+                                            current <=> root.video-quality-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        FieldRow {
+                                            visible: root.mode-index == 0;
+                                            text: "Audio";
+                                            items: ["Copy source audio", "No audio", "AAC 320k · for editors"];
+                                            current <=> root.audio-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        FieldRow {
+                                            visible: root.mode-index == 1;
+                                            text: "Format";
+                                            items: ["PNG · lossless", "JPEG · quality 95", "WebP · lossless"];
+                                            current <=> root.image-format-index;
+                                            changed(i) => { root.settings-changed(); }
+                                        }
+
+                                        Help {
+                                            lines: 3;
+                                            text: root.mode-index == 0
+                                                ? "H.264 is the most compatible. H.265 is usually smaller at similar quality. MKV is resilient and accepts a wider range of copied audio streams."
+                                                : root.image-format-index == 1
+                                                    ? "JPEG is smaller but lossy and cannot preserve transparency. PNG and lossless WebP preserve alpha when the source has it."
+                                                    : "PNG and lossless WebP preserve full image quality and source transparency.";
+                                        }
+                                    }
+
+                                    Rectangle { height: 6px; }
+                                }
+                            }
+
+                            // ── Sticky export footer ────────────────────────
+                            Rectangle { height: 1px; background: Pal.line; }
+
+                            Rectangle {
+                                height: 52px;
+                                background: Pal.card;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    spacing: 10px;
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        GearGlyph { }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        horizontal-stretch: 1;
+
+                                        Text {
+                                            text: root.mode-index == 0
+                                                ? "Video upscale output"
+                                                : "Image upscale output";
+                                            color: Pal.text;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                        }
+
+                                        Mono {
+                                            text: root.mode-index == 0
+                                                ? (root.video-format-index == 0 ? "MP4 · H.264 NVENC"
+                                                    : root.video-format-index == 1 ? "MP4 · H.265 NVENC"
+                                                    : root.video-format-index == 2 ? "MKV · H.264 NVENC"
+                                                    : "MKV · H.265 NVENC")
+                                                    + (root.video-quality-index == 0 ? " · CQ 15"
+                                                        : root.video-quality-index == 1 ? " · CQ 19"
+                                                        : " · CQ 23")
+                                                    + (root.audio-index == 0 ? " · audio copy"
+                                                        : root.audio-index == 2 ? " · AAC audio"
+                                                        : " · no audio")
+                                                : (root.image-format-index == 0 ? "PNG · lossless"
+                                                    : root.image-format-index == 1 ? "JPEG · quality 95"
+                                                    : "WebP · lossless");
+                                            color: Pal.text-mute;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: root.mode-index == 0 && root.video-pipeline-index == 1 ? "RTX VSR"
+                                                : root.mode-index == 0 && root.video-pipeline-index == 2 ? "VIDEO2X"
+                                                : root.mode-index == 0 ? "CONFIGURABLE"
+                                                : root.image-pipeline-index == 1 ? "GENERATIVE"
+                                                : root.image-pipeline-index == 2 ? "RTX VSR"
+                                                : "LOSSLESS";
+                                            color: Pal.text-mute;
+                                            font-size: 9px;
+                                            font-weight: 700;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 56px;
+                                background: Pal.panel;
+
+                                HorizontalLayout {
+                                    padding: 12px;
+                                    spacing: 10px;
+
+                                    Btn {
+                                        text: "Upscale";
+                                        primary: true;
+                                        horizontal-stretch: 1;
+                                        enabled: (root.tasks.length > 0 || root.has-clip) && !root.export-running;
+                                        clicked => { root.export-current(); }
+                                    }
+
+                                    Btn {
+                                        text: root.export-running ? "Cancel Upscale" : "Batch Upscale";
+                                        horizontal-stretch: 1;
+                                        enabled: root.tasks.length > 0;
+                                        clicked => {
+                                            if (root.export-running) { root.cancel-export(); }
+                                            else { root.batch-export(); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                    }
+
                 }
 
-                // ══ Left column ══════════════════════════════════════════
+                // ══ Preview column ══════════════════════════════════════════
                 VerticalLayout {
                     horizontal-stretch: 1;
                     spacing: 0;
@@ -1141,6 +2415,40 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    // Splitter: drag up to give the strip and batch list more room.
+                    Rectangle {
+                        height: 7px;
+                        background: split-ta.pressed ? Pal.accent-dim
+                            : split-ta.has-hover ? Pal.line : Pal.bg;
+
+                        Rectangle {
+                            width: 36px;
+                            height: 3px;
+                            border-radius: 1.5px;
+                            background: split-ta.has-hover || split-ta.pressed
+                                ? Pal.accent : Pal.line;
+                        }
+
+                        split-ta := TouchArea {
+                            mouse-cursor: MouseCursor.row-resize;
+                            pointer-event(ev) => {
+                                // Saved with the other settings on close; no
+                                // re-render is needed for a layout change.
+                                if (ev.kind == PointerEventKind.down) {
+                                    root.batch-drag-start = root.batch-height;
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    root.batch-height = Math.clamp(
+                                        root.batch-drag-start + self.pressed-y - self.mouse-y,
+                                        110px,
+                                        max(110px, root.height - 520px));
+                                }
+                            }
+                        }
+                    }
+
                     // Filmstrip
                     Rectangle {
                         height: 88px;
@@ -1149,7 +2457,6 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             padding: 10px;
                             spacing: 10px;
-                            alignment: start;
 
                             Rectangle {
                                 width: 68px;
@@ -1186,19 +2493,95 @@ export component MainWindow inherits Window {
 
                             Rectangle { width: 1px; background: Pal.line-soft; }
 
-                            Text {
-                                text: root.mode-index == 0 ? "No clips loaded" : "No images loaded";
+                            if root.clips.length == 0: Text {
+                                horizontal-stretch: 1;
+                                text: root.mode-index == 0
+                                    ? "No clips loaded · drop one or more videos here"
+                                    : "No images loaded";
                                 color: Pal.text-mute;
                                 font-size: 11.5px;
                                 vertical-alignment: center;
-                                visible: !root.has-clip;
+                            }
+
+                            if root.clips.length > 0: ScrollView {
+                                horizontal-stretch: 1;
+                                viewport-width: max(self.width, root.clips.length * 130px);
+                                viewport-height: 68px;
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+
+                                    for c[i] in root.clips: Rectangle {
+                                        width: 122px;
+                                        height: 68px;
+                                        border-radius: Pal.radius;
+                                        border-width: c.active ? 2px : 1px;
+                                        border-color: c.active ? Pal.accent
+                                            : card-ta.has-hover ? Pal.accent-dim : Pal.line;
+                                        background: Pal.panel;
+                                        clip: true;
+
+                                        card-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.select-clip(i); }
+                                        }
+
+                                        Image {
+                                            x: 5px;
+                                            y: 4px;
+                                            width: 112px;
+                                            height: 40px;
+                                            source: c.thumb;
+                                            image-fit: contain;
+                                        }
+
+                                        Text {
+                                            x: 6px;
+                                            y: 46px;
+                                            width: 110px;
+                                            text: c.name;
+                                            color: c.active ? Pal.accent : Pal.text;
+                                            font-size: 9.5px;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            x: 6px;
+                                            y: 56px;
+                                            text: c.length;
+                                            color: Pal.text-mute;
+                                            font-size: 9px;
+                                        }
+
+                                        Rectangle {
+                                            x: parent.width - 21px;
+                                            y: 3px;
+                                            width: 18px;
+                                            height: 18px;
+                                            border-radius: 9px;
+                                            border-width: 1px;
+                                            border-color: x-ta.has-hover ? Pal.danger : Pal.line;
+                                            visible: card-ta.has-hover || x-ta.has-hover;
+                                            background: x-ta.has-hover ? Pal.danger : #000000d0;
+
+                                            CloseGlyph {
+                                                tint: #ffffff;
+                                            }
+
+                                            x-ta := TouchArea {
+                                                clicked => { root.remove-clip(i); }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
 
                     // Export queue
                     Rectangle {
-                        height: 150px;
+                        height: root.batch-height;
                         background: Pal.panel;
 
                         Rectangle {
@@ -1224,11 +2607,19 @@ export component MainWindow inherits Window {
                                 Rectangle { horizontal-stretch: 1; }
 
                                 Btn {
-                                    text: "Clear Queue";
+                                    text: "Add Files…";
                                     width: 86px;
                                     height: 24px;
-                                    enabled: root.tasks.length > 0;
-                                    clicked => { root.clear-queue(); }
+                                    clicked => { root.add-files(); }
+                                }
+
+                                Btn {
+                                    text: "Clear All";
+                                    width: 86px;
+                                    height: 24px;
+                                    enabled: root.tasks.length > 0 || root.clips.length > 0
+                                        || root.has-clip;
+                                    clicked => { root.clear-all(); }
                                 }
 
                                 Mono {
@@ -1264,7 +2655,7 @@ export component MainWindow inherits Window {
                                         alignment: start;
                                         spacing: 4px;
 
-                                        for t in root.tasks: Rectangle {
+                                        for t[i] in root.tasks: Rectangle {
                                             height: 40px;
                                             background: Pal.card;
                                             border-radius: 3px;
@@ -1352,6 +2743,33 @@ export component MainWindow inherits Window {
                                                              : Pal.text-dim;
                                                     }
                                                 }
+
+                                                // Rows are addressed by position
+                                                // while a batch runs, so removal
+                                                // waits until it has finished.
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 22px;
+                                                        height: 22px;
+                                                        border-radius: 3px;
+                                                        background: rm.has-hover && !root.export-running
+                                                            ? Pal.raised : transparent;
+
+                                                        CloseGlyph {
+                                                            tint: root.export-running ? Pal.line
+                                                                : rm.has-hover ? Pal.danger
+                                                                : Pal.text-dim;
+                                                        }
+
+                                                        rm := TouchArea {
+                                                            enabled: !root.export-running;
+                                                            mouse-cursor: root.export-running
+                                                                ? default : pointer;
+                                                            clicked => { root.remove-task(i); }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1406,921 +2824,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // ══ Settings rail ════════════════════════════════════════
-                railpane := Rectangle {
-                    property <length> drawer-w: root.right-panel < 0 ? 0px : Pal.rail-w;
-                    width: 30px + railpane.drawer-w;
-                    background: Pal.bg;
-                    clip: true;
 
-                    // Slint's ScrollView does not derive its viewport from the
-                    // content, and a VerticalLayout given less height than it
-                    // needs overlaps its children rather than overflowing, so
-                    // the scroll height is stated outright. Values are
-                    // deliberately generous — overshooting costs a little dead
-                    // scroll space, undershooting brings the overlap back.
-                    property <length> content-h:
-                          190px
-                        + (root.right-panel == 0 ? 330px : 0px)
-                        + (root.right-panel == 1 ? 620px : 0px)
-                        + (root.right-panel == 1 && root.mode-index == 1 && root.image-pipeline-index == 1 ? 360px : 0px)
-                        + (root.right-panel == 2 ? 610px : 0px)
-                        + (root.right-panel == 3 ? 430px : 0px);
-
-                    Rectangle {
-                        x: 0;
-                        width: railpane.drawer-w;
-                        height: 100%;
-                        background: Pal.panel;
-                    }
-
-                    Rectangle {
-                        x: 0;
-                        width: 1px;
-                        height: 100%;
-                        background: Pal.line;
-                    }
-
-                    VerticalLayout {
-                        x: 0;
-                        width: Pal.rail-w;
-                        height: 100%;
-                        spacing: 0;
-                        visible: root.right-panel >= 0;
-
-                        ScrollView {
-                            vertical-stretch: 1;
-                            viewport-height: railpane.content-h;
-
-                            rail := VerticalLayout {
-                                // `alignment: start` is load-bearing: without
-                                // it the layout stretches to the viewport and,
-                                // when the viewport is shorter than the
-                                // content, compresses past its minimums and
-                                // overlaps sections instead of scrolling.
-                                alignment: start;
-                                padding: 12px;
-                                spacing: 5px;
-
-                                // ── Video info ──────────────────────────
-                                SectionLabel { text: root.mode-index == 0 ? "VIDEO INFO" : "IMAGE INFO"; }
-
-                                Card {
-                                    height: 62px;
-
-                                    HorizontalLayout {
-                                        padding: 8px;
-                                        spacing: 10px;
-
-                                        Rectangle {
-                                            width: 76px;
-                                            background: Pal.input;
-                                            border-radius: 3px;
-                                            border-width: 1px;
-                                            border-color: Pal.line-soft;
-                                            clip: true;
-
-                                            Image {
-                                                width: 100%;
-                                                height: 100%;
-                                                source: root.thumb;
-                                                image-fit: contain;
-                                                visible: root.has-clip;
-                                            }
-                                        }
-
-                                        VerticalLayout {
-                                            alignment: center;
-                                            spacing: 3px;
-                                            horizontal-stretch: 1;
-
-                                            Text {
-                                                text: root.has-clip ? root.clip-name
-                                                    : root.mode-index == 0 ? "No video selected"
-                                                    : "No image selected";
-                                                color: root.has-clip ? Pal.text : Pal.text-mute;
-                                                font-size: 11.5px;
-                                                font-weight: 500;
-                                                overflow: elide;
-                                            }
-
-                                            Mono {
-                                                text: root.clip-specs;
-                                                color: Pal.text-mute;
-                                                visible: root.has-clip;
-                                            }
-                                        }
-
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Btn {
-                                                text: "Clear";
-                                                width: 56px;
-                                                height: 26px;
-                                                enabled: root.has-clip;
-                                                clicked => { root.clear-video(); }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Rectangle { height: 3px; }
-                                Rule { }
-
-                                // ── Source ──────────────────────────────
-                                SectionHeader {
-                                    title: "Source";
-                                    visible: root.mode-index == 0 && root.right-panel == 0;
-                                    gated: false;
-                                    enabled: true;
-                                    expanded <=> root.src-open;
-                                }
-
-                                if root.mode-index == 0 && root.right-panel == 0 && root.src-open: VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-bottom: 10px;
-                                    spacing: 9px;
-
-                                    Help {
-                                        lines: 2;
-                                        text: "Source profile and restoration are applied before AI upscaling.";
-                                    }
-
-                                    FieldRow {
-                                        text: "Content";
-                                        accent: true;
-                                        enabled: root.has-clip;
-                                        current <=> root.content-index;
-                                        changed(i) => { root.settings-changed(); }
-                                        items: [
-                                            "AI generated video",
-                                            "Film / movie (24p)",
-                                            "TV — shot on film",
-                                            "TV — shot on video",
-                                            "Modern digital",
-                                        ];
-                                    }
-
-                                    Help {
-                                        lines: 3;
-                                        text: "Gates the automatic front-end: deinterlace runs "
-                                            + "only on the TV profiles, and only when the source "
-                                            + "really is interlaced. Restore below is a manual "
-                                            + "choice and applies to every profile.";
-                                    }
-
-                                    // Raised by the probe when the source has
-                                    // real fields — the front-end has to run
-                                    // before any detail model touches it.
-                                    if root.source-note != "": Rectangle {
-                                        height: 34px;
-                                        background: #3a2410;
-                                        border-radius: 3px;
-                                        border-width: 1px;
-                                        border-color: Pal.ember;
-
-                                        Text {
-                                            x: 9px;
-                                            width: parent.width - 18px;
-                                            height: 100%;
-                                            text: root.source-note;
-                                            color: Pal.ember;
-                                            font-size: 10.5px;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
-                                    }
-
-                                    FieldRow {
-                                        text: "Restore";
-                                        enabled: root.has-clip;
-                                        current <=> root.restore-index;
-                                        changed(i) => { root.settings-changed(); }
-                                        items: [
-                                            "None",
-                                            "Deblock — light",
-                                            "Deblock — DVD / MPEG-2",
-                                            "Dejpeg — heavy compression",
-                                        ];
-                                    }
-
-                                    CheckRow {
-                                        text: "Deinterlace detected fields";
-                                        enabled: root.has-clip && (root.content-index == 2 || root.content-index == 3);
-                                        checked <=> root.detect-fields;
-                                        toggled(v) => { root.settings-changed(); }
-                                    }
-
-                                    CheckRow {
-                                        text: "Preserve grain — planned";
-                                        enabled: false;
-                                        checked <=> root.preserve-grain;
-                                        toggled(v) => { root.settings-changed(); }
-                                    }
-                                }
-
-                                Rule { }
-
-                                // ── Detail model ────────────────────────
-                                // Not gated: the detail model *is* the app, so
-                                // a checkbox to switch it off is noise.
-                                SectionHeader {
-                                    title: "Detail Model";
-                                    visible: root.right-panel == 1;
-                                    gated: false;
-                                    enabled: true;
-                                    expanded <=> root.det-open;
-                                }
-
-                                if root.right-panel == 1 && root.det-open: VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-bottom: 10px;
-                                    spacing: 9px;
-
-                                    Help {
-                                        lines: 2;
-                                        text: "The bundled GPU runtime is required for preview and upscaling; missing GPU support is reported instead of silently rendering very slowly.";
-                                    }
-
-                                    if root.mode-index == 0: HorizontalLayout {
-                                        spacing: 6px;
-                                        SegBtn {
-                                            text: "Models";
-                                            active: root.video-pipeline-index == 0;
-                                            horizontal-stretch: 1;
-                                            clicked => {
-                                                root.video-pipeline-index = 0;
-                                                root.settings-changed();
-                                            }
-                                        }
-                                        SegBtn {
-                                            text: "RTX VSR";
-                                            enabled: root.rtx-vsr-ready;
-                                            active: root.video-pipeline-index == 1;
-                                            horizontal-stretch: 1;
-                                            clicked => {
-                                                root.video-pipeline-index = 1;
-                                                root.settings-changed();
-                                            }
-                                        }
-                                    }
-
-                                    if root.mode-index == 1: HorizontalLayout {
-                                        spacing: 6px;
-                                        SegBtn {
-                                            text: "Faithful";
-                                            active: root.image-pipeline-index == 0;
-                                            horizontal-stretch: 1;
-                                            clicked => {
-                                                root.image-pipeline-index = 0;
-                                                root.settings-changed();
-                                            }
-                                        }
-                                        SegBtn {
-                                            text: "Generative";
-                                            active: root.image-pipeline-index == 1;
-                                            horizontal-stretch: 1;
-                                            clicked => {
-                                                root.image-pipeline-index = 1;
-                                                root.settings-changed();
-                                            }
-                                        }
-                                        SegBtn {
-                                            text: "RTX VSR";
-                                            enabled: root.rtx-vsr-ready;
-                                            active: root.image-pipeline-index == 2;
-                                            horizontal-stretch: 1;
-                                            clicked => {
-                                                root.image-pipeline-index = 2;
-                                                root.settings-changed();
-                                            }
-                                        }
-                                    }
-
-                                    FieldRow {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        text: "Model";
-                                        accent: true;
-                                        items: root.model-names;
-                                        current <=> root.model-index;
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    HorizontalLayout {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        spacing: 7px;
-                                        Text {
-                                            text: "?";
-                                            color: Pal.accent;
-                                            font-size: 11px;
-                                            font-weight: 700;
-                                            width: 12px;
-                                        }
-                                        Help {
-                                            lines: 3;
-                                            text: root.model-note;
-                                            horizontal-stretch: 1;
-                                        }
-                                    }
-
-                                    SliderRow {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        text: "Strength";
-                                        value <=> root.strength;
-                                        // Re-render on release, not on every
-                                        // pixel of the drag.
-                                        released => { root.settings-changed(); }
-                                    }
-
-                                    Help {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        lines: 2;
-                                        text: "Flat blend toward the source. Softens everything "
-                                            + "equally, including detail you wanted.";
-                                    }
-
-                                    SliderRow {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        text: "Detail limit";
-                                        value <=> root.detail-limit;
-                                        released => { root.settings-changed(); }
-                                    }
-
-                                    Help {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        lines: 3;
-                                        text: "Caps how far a pixel may move from the source. "
-                                            + "Removes invented structure (freckles drawn as "
-                                            + "black strokes) while keeping sharpening. Try 0.2.";
-                                    }
-
-                                    CheckRow {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        text: "Half precision (FP16)";
-                                        hint: "Uses a compatible FP16 model when available. Speedup is model- and tile-dependent.";
-                                        checked <=> root.fp16;
-                                        toggled(v) => { root.settings-changed(); }
-                                    }
-
-                                    CheckRow {
-                                        visible: (root.mode-index == 0 && root.video-pipeline-index != 1)
-                                            || (root.mode-index == 1 && root.image-pipeline-index != 2);
-                                        text: "Auto tile size";
-                                        hint: "Uses a larger tile on high-VRAM GPUs. Disable for the conservative 256px tile.";
-                                        checked <=> root.auto-tile;
-                                        toggled(v) => { root.settings-changed(); }
-                                    }
-
-                                    if (root.mode-index == 1 && root.image-pipeline-index == 2)
-                                        || (root.mode-index == 0 && root.video-pipeline-index == 1): VerticalLayout {
-                                        spacing: 9px;
-
-                                        Rectangle { height: 1px; background: Pal.line-soft; }
-
-                                        Help {
-                                            lines: 3;
-                                            text: root.mode-index == 0
-                                                ? "NVIDIA RTX VSR runs as a persistent video session. Frames stay in one GPU effect so temporal history can stabilize the shot. Hard cuts reset that history."
-                                                : "NVIDIA RTX Video Super Resolution runs directly on the GPU. It is a fast, faithful enhancement pass with no prompts, diffusion, or invented composition.";
-                                        }
-
-                                        FieldRow {
-                                            text: "Quality";
-                                            accent: true;
-                                            enabled: root.rtx-vsr-ready;
-                                            items: ["Low", "Medium", "High", "Ultra"];
-                                            current <=> root.rtx-vsr-quality-index;
-                                            changed(i) => { root.settings-changed(); }
-                                        }
-
-                                        Help {
-                                            lines: 2;
-                                            text: "Ultra is NVIDIA's highest-detail VSR model. The network renders the exact target size. Lower modes trade some enhancement for speed.";
-                                        }
-                                    }
-
-                                    if root.mode-index == 1 && root.image-pipeline-index == 1: VerticalLayout {
-                                        spacing: 9px;
-
-                                        Rectangle { height: 1px; background: Pal.line-soft; }
-
-                                        Help {
-                                            lines: 3;
-                                            text: root.generative-runtime-ready
-                                                ? "The faithful model runs first. A native FLUX image-to-image pass then refines overlapping tiles. The stage runs only during Upscale because it is much slower than the preview model."
-                                                : "Native generative runtime or a complete model package is missing. Add sd-server beside the app and a manifest under models/generative/.";
-                                            color: root.generative-runtime-ready ? Pal.text-mute : Pal.ember;
-                                        }
-
-                                        FieldRow {
-                                            text: "Refiner";
-                                            accent: true;
-                                            enabled: root.generative-runtime-ready;
-                                            items: root.generative-model-names;
-                                            current <=> root.generative-model-index;
-                                            changed(i) => { root.settings-changed(); }
-                                        }
-
-                                        FieldLabel { text: "Refine prompt"; }
-                                        Rectangle {
-                                            height: 30px;
-                                            background: Pal.input;
-                                            border-width: 1px;
-                                            border-color: Pal.line;
-                                            border-radius: 3px;
-
-                                            LineEdit {
-                                                x: 6px;
-                                                y: 3px;
-                                                width: parent.width - 12px;
-                                                height: parent.height - 6px;
-                                                text <=> root.generative-prompt;
-                                                placeholder-text: "describe detail while preserving composition";
-                                                accepted => { root.settings-changed(); }
-                                            }
-                                        }
-
-                                        FieldRow {
-                                            text: "Steps";
-                                            items: ["8", "15", "20", "28"];
-                                            current <=> root.generative-steps-index;
-                                            changed(i) => { root.settings-changed(); }
-                                        }
-
-                                        SliderRow {
-                                            text: "Denoise";
-                                            minimum: 0.05;
-                                            maximum: 0.40;
-                                            value <=> root.generative-denoise;
-                                            released => { root.settings-changed(); }
-                                        }
-
-                                        Help {
-                                            lines: 3;
-                                            text: "0.10 is conservative and close to Kraken Art's default. Higher values invent more detail but can change faces, text, and structure.";
-                                        }
-
-                                        FieldRow {
-                                            text: "Refine tile";
-                                            items: ["512 px", "768 px", "1024 px"];
-                                            current <=> root.generative-tile-index;
-                                            changed(i) => { root.settings-changed(); }
-                                        }
-
-                                        CheckRow {
-                                            text: "Quality finish";
-                                            hint: "Applies restrained sharpening after tile blending and source-color matching.";
-                                            hint-lines: 2;
-                                            checked <=> root.generative-quality-finish;
-                                            toggled(v) => { root.settings-changed(); }
-                                        }
-                                    }
-                                }
-
-                                Rule { }
-
-                                // ── Stability (the temporal lock) ───────
-                                SectionHeader {
-                                    title: root.model-is-video
-                                        ? "Temporal consistency — built into model"
-                                        : "Stability — temporal lock";
-                                    visible: root.mode-index == 0 && root.right-panel == 2;
-                                    enabled <=> root.stability-on;
-                                    interactive: !root.model-is-video;
-                                    expanded <=> root.stb-open;
-                                    toggled(v) => { root.settings-changed(); }
-                                }
-
-                                if root.mode-index == 0 && root.right-panel == 2 && root.stb-open: VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-bottom: 10px;
-                                    spacing: 9px;
-
-                                    Rectangle {
-                                        background: Pal.violet-deep;
-                                        border-radius: 3px;
-                                        border-width: 1px;
-                                        border-color: Pal.violet;
-
-                                        VerticalLayout {
-                                            padding: 9px;
-                                            Help {
-                                                lines: 3;
-                                                text: root.video-pipeline-index == 1
-                                                    ? "RTX VSR already keeps temporal history inside the NVIDIA effect. The separate frame-model lock is bypassed. History is cleared at hard cuts."
-                                                    : root.model-is-video
-                                                    ? "This model consumes neighboring frames together and learns temporal detail directly. The separate frame-model lock is bypassed."
-                                                    : root.model-video-tuned
-                                                        ? "This model was selected for good video behavior, but it still processes one frame at a time. Stability remains available to reduce frame-to-frame shimmer."
-                                                    : "Holds invented detail still across frames so texture stops boiling. This improves frame models but does not turn them into a learned video model.";
-                                                color: Pal.text-dim;
-                                            }
-                                        }
-                                    }
-
-                                    SliderRow {
-                                        text: "Lock";
-                                        enabled: root.stability-on && !root.model-is-video;
-                                        value <=> root.lock;
-                                        released => { root.settings-changed(); }
-                                    }
-
-                                    SliderRow {
-                                        text: "Cut detect";
-                                        enabled: root.stability-on && !root.model-is-video;
-                                        value <=> root.cut-detect;
-                                        released => { root.settings-changed(); }
-                                    }
-
-                                    Help {
-                                        lines: 3;
-                                        text: "Higher Lock is steadier but smears fast motion. "
-                                            + "Held detail is released automatically wherever "
-                                            + "motion cannot be tracked, and reset at cuts.";
-                                    }
-
-                                    Help {
-                                        lines: 3;
-                                        text: "The preview renders the preceding frame too so "
-                                            + "this can be judged before upscaling — scrub off "
-                                            + "the first frame to see it, at roughly double the "
-                                            + "preview time.";
-                                        color: Pal.text-mute;
-                                    }
-                                }
-
-                                Rule { }
-
-                                // ── Frame interpolation ─────────────────
-                                fi-hdr := SectionHeader {
-                                    title: root.interp-available ? "Frame Interpolation — RIFE"
-                                        : "Frame Interpolation — model missing";
-                                    gated: true;
-                                    visible: root.mode-index == 0 && root.right-panel == 2;
-                                    enabled <=> root.interp-on;
-                                    interactive: root.interp-available;
-                                    expanded <=> root.fi-open;
-                                    toggled(v) => { root.settings-changed(); }
-                                }
-
-                                if root.mode-index == 0 && root.right-panel == 2 && root.fi-open: VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-bottom: 10px;
-                                    spacing: 9px;
-
-                                    Help {
-                                        lines: 3;
-                                        text: root.interp-available
-                                            ? "RIFE synthesizes motion-aware frames between source frames. It runs before detail upscaling and increases processing time with the chosen frame rate."
-                                            : "Add RIFE_fp32_timestep.onnx to models/interpolation and restart the app.";
-                                    }
-
-                                    FieldRow {
-                                        text: "Target";
-                                        current <=> root.interp-index;
-                                        enabled: root.has-clip && root.interp-on && root.interp-available;
-                                        accent: root.interp-on;
-                                        items: ["48 fps", "60 fps", "120 fps"];
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-                                }
-
-                                Rule { }
-
-                                // ── Color ───────────────────────────────
-                                col-hdr := SectionHeader {
-                                    title: "Color";
-                                    visible: root.right-panel == 2;
-                                    gated: false;
-                                    enabled: true;
-                                    expanded <=> root.col-open;
-                                }
-
-                                if root.right-panel == 2 && root.col-open: VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-bottom: 10px;
-                                    spacing: 9px;
-
-                                    CheckRow {
-                                        text: "Match to source";
-                                        hint: "Corrects color drift from both RIFE interpolation and detail upscaling.";
-                                        checked <=> root.match-color;
-                                        enabled: root.has-clip;
-                                        toggled(v) => { root.settings-changed(); }
-                                    }
-                                }
-
-                                // ── Output ──────────────────────────────
-                                if root.right-panel == 3: VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-bottom: 10px;
-                                    spacing: 10px;
-
-                                    SectionLabel { text: "OUTPUT GOAL"; }
-
-                                    FieldRow {
-                                        text: "Resolution";
-                                        accent: true;
-                                        enabled: root.has-clip;
-                                        items: [
-                                            "HD · 720p",
-                                            "Full HD · 1080p",
-                                            "2K · 1440p",
-                                            "4K / UHD · 2160p",
-                                            "Multiplier · x2",
-                                            "Multiplier · x3",
-                                            "Multiplier · x4",
-                                        ];
-                                        item-colors: [
-                                            root.goal-color-720,
-                                            root.goal-color-1080,
-                                            root.goal-color-1440,
-                                            root.goal-color-2160,
-                                            Pal.ok,
-                                            Pal.accent,
-                                            Pal.accent,
-                                        ];
-                                        current <=> root.resolution-index;
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    HorizontalLayout {
-                                        spacing: 10px;
-                                        Text { text: "● Downsize"; color: Pal.danger; font-size: 9px; }
-                                        Text { text: "● Near source"; color: Pal.warn; font-size: 9px; }
-                                        Text { text: "● Upscale"; color: Pal.ok; font-size: 9px; }
-                                        Text { text: "● Large"; color: Pal.accent; font-size: 9px; }
-                                    }
-
-                                    Help {
-                                        lines: 4;
-                                        text: "Colors compare each goal with the loaded source. Near source means within 5%. Named goals preserve aspect ratio: landscape targets height and portrait targets width. x2/x3/x4 remain direct multipliers.";
-                                    }
-
-                                    if root.scale-note != "": HorizontalLayout {
-                                        spacing: 7px;
-                                        Text {
-                                            text: "!";
-                                            color: Pal.ember;
-                                            font-size: 11px;
-                                            font-weight: 700;
-                                            width: 12px;
-                                        }
-                                        Help {
-                                            lines: 3;
-                                            text: root.scale-note;
-                                            color: Pal.ember;
-                                            horizontal-stretch: 1;
-                                        }
-                                    }
-
-                                    Rectangle { height: 1px; background: Pal.line-soft; }
-                                    SectionLabel { text: root.mode-index == 0 ? "VIDEO FORMAT" : "IMAGE FORMAT"; }
-
-                                    FieldRow {
-                                        visible: root.mode-index == 0;
-                                        text: "Format";
-                                        items: [
-                                            "MP4 · H.264 NVENC",
-                                            "MP4 · H.265 / HEVC NVENC",
-                                            "MKV · H.264 NVENC",
-                                            "MKV · H.265 / HEVC NVENC",
-                                        ];
-                                        current <=> root.video-format-index;
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    FieldRow {
-                                        visible: root.mode-index == 0;
-                                        text: "Quality";
-                                        items: ["Best · CQ 15", "High · CQ 19", "Balanced · CQ 23"];
-                                        current <=> root.video-quality-index;
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    FieldRow {
-                                        visible: root.mode-index == 0;
-                                        text: "Audio";
-                                        items: ["Copy source audio", "No audio"];
-                                        current <=> root.audio-index;
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    FieldRow {
-                                        visible: root.mode-index == 1;
-                                        text: "Format";
-                                        items: ["PNG · lossless", "JPEG · quality 95", "WebP · lossless"];
-                                        current <=> root.image-format-index;
-                                        changed(i) => { root.settings-changed(); }
-                                    }
-
-                                    Help {
-                                        lines: 3;
-                                        text: root.mode-index == 0
-                                            ? "H.264 is the most compatible. H.265 is usually smaller at similar quality. MKV is resilient and accepts a wider range of copied audio streams."
-                                            : root.image-format-index == 1
-                                                ? "JPEG is smaller but lossy and cannot preserve transparency. PNG and lossless WebP preserve alpha when the source has it."
-                                                : "PNG and lossless WebP preserve full image quality and source transparency.";
-                                    }
-                                }
-
-                                Rectangle { height: 6px; }
-                            }
-                        }
-
-                        // ── Sticky export footer ────────────────────────
-                        Rectangle { height: 1px; background: Pal.line; }
-
-                        Rectangle {
-                            height: 52px;
-                            background: Pal.card;
-
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 10px;
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    GearGlyph { }
-                                }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 2px;
-                                    horizontal-stretch: 1;
-
-                                    Text {
-                                        text: root.mode-index == 0
-                                            ? "Video upscale output"
-                                            : "Image upscale output";
-                                        color: Pal.text;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                    }
-
-                                    Mono {
-                                        text: root.mode-index == 0
-                                            ? (root.video-format-index == 0 ? "MP4 · H.264 NVENC"
-                                                : root.video-format-index == 1 ? "MP4 · H.265 NVENC"
-                                                : root.video-format-index == 2 ? "MKV · H.264 NVENC"
-                                                : "MKV · H.265 NVENC")
-                                                + (root.video-quality-index == 0 ? " · CQ 15"
-                                                    : root.video-quality-index == 1 ? " · CQ 19"
-                                                    : " · CQ 23")
-                                                + (root.audio-index == 0 ? " · audio copy" : " · no audio")
-                                            : (root.image-format-index == 0 ? "PNG · lossless"
-                                                : root.image-format-index == 1 ? "JPEG · quality 95"
-                                                : "WebP · lossless");
-                                        color: Pal.text-mute;
-                                    }
-                                }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    Text {
-                                        text: root.mode-index == 0 && root.video-pipeline-index == 1 ? "RTX VSR"
-                                            : root.mode-index == 0 ? "CONFIGURABLE"
-                                            : root.image-pipeline-index == 1 ? "GENERATIVE"
-                                            : root.image-pipeline-index == 2 ? "RTX VSR"
-                                            : "LOSSLESS";
-                                        color: Pal.text-mute;
-                                        font-size: 9px;
-                                        font-weight: 700;
-                                    }
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            height: 56px;
-                            background: Pal.panel;
-
-                            HorizontalLayout {
-                                padding: 12px;
-                                spacing: 10px;
-
-                                Btn {
-                                    text: "Upscale";
-                                    primary: true;
-                                    horizontal-stretch: 1;
-                                    enabled: (root.tasks.length > 0 || root.has-clip) && !root.export-running;
-                                    clicked => { root.export-current(); }
-                                }
-
-                                Btn {
-                                    text: root.export-running ? "Cancel Upscale" : "Batch Upscale";
-                                    horizontal-stretch: 1;
-                                    enabled: root.tasks.length > 0;
-                                    clicked => {
-                                        if (root.export-running) { root.cancel-export(); }
-                                        else { root.batch-export(); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Always-visible right margin tabs. This mirrors the
-                    // LOGS / SYSTEM strip on the left. The selected category
-                    // changes while the bottom upscale controls stay pinned.
-                    Rectangle {
-                        x: railpane.drawer-w;
-                        width: 30px;
-                        height: 100%;
-                        background: Pal.panel;
-
-                        Rectangle {
-                            x: 0;
-                            width: 1px;
-                            height: 100%;
-                            background: Pal.line;
-                        }
-
-                        VTab {
-                            x: 3px;
-                            y: 10px;
-                            letters: ["I", "N", "P", "U", "T"];
-                            active: root.right-panel == 0;
-                            clicked => {
-                                root.right-panel = root.right-panel == 0 ? -1 : 0;
-                                root.settings-changed();
-                            }
-                        }
-
-                        Rectangle {
-                            x: 7px;
-                            y: 96px;
-                            width: 16px;
-                            height: 1px;
-                            background: Pal.line;
-                        }
-
-                        VTab {
-                            x: 3px;
-                            y: 104px;
-                            letters: ["E", "N", "H", "A", "N", "C", "E"];
-                            active: root.right-panel == 1;
-                            clicked => {
-                                root.right-panel = root.right-panel == 1 ? -1 : 1;
-                                root.settings-changed();
-                            }
-                        }
-
-                        Rectangle {
-                            x: 7px;
-                            y: 216px;
-                            width: 16px;
-                            height: 1px;
-                            background: Pal.line;
-                            visible: root.mode-index == 0;
-                        }
-
-                        VTab {
-                            x: 3px;
-                            y: 224px;
-                            letters: ["M", "O", "T", "I", "O", "N"];
-                            active: root.right-panel == 2;
-                            visible: root.mode-index == 0;
-                            clicked => {
-                                root.right-panel = root.right-panel == 2 ? -1 : 2;
-                                root.settings-changed();
-                            }
-                        }
-
-                        Rectangle {
-                            x: 7px;
-                            y: root.mode-index == 0 ? 323px : 216px;
-                            width: 16px;
-                            height: 1px;
-                            background: Pal.line;
-                        }
-
-                        VTab {
-                            x: 3px;
-                            y: root.mode-index == 0 ? 331px : 224px;
-                            letters: ["O", "U", "T", "P", "U", "T"];
-                            active: root.right-panel == 3;
-                            clicked => {
-                                root.right-panel = root.right-panel == 3 ? -1 : 3;
-                                root.settings-changed();
-                            }
-                        }
-                    }
-                }
             }
         }
 

@@ -4,7 +4,7 @@
 //! and know nothing about time, while a real video model consumes NTCHW and
 //! returns a sequence. Long clips are fed in bounded windows by the exporter.
 
-use ort::ep::{CPU, CUDA};
+use ort::ep::{DirectML, CPU, CUDA};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 
@@ -21,31 +21,43 @@ pub struct VideoUpscaler {
 
 impl VideoUpscaler {
     pub fn load(entry: &ModelEntry) -> Result<Self, String> {
+        Self::load_with_backend(entry, "auto")
+    }
+
+    pub fn load_with_backend(entry: &ModelEntry, backend: &str) -> Result<Self, String> {
         if entry.temporal_frames <= 1 {
             return Err(format!("{} is not marked as a video model", entry.name));
         }
         let path = models_dir().join(&entry.file);
-        let build = |cuda: bool| -> Result<Session, String> {
-            let provider = if cuda {
-                vec![CUDA::default().build().error_on_failure()]
-            } else {
-                vec![CPU::default().build()]
-            };
+        let build = |provider| -> Result<Session, String> {
             Session::builder()
                 .map_err(|e| format!("video session builder: {e}"))?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| format!("video graph optimization: {e}"))?
-                .with_execution_providers(provider)
+                .with_execution_providers(vec![provider])
                 .map_err(|e| format!("video execution provider: {e}"))?
                 .commit_from_file(&path)
                 .map_err(|e| format!("loading {}: {e}", path.display()))
         };
-        let (session, provider) = match build(true) {
-            Ok(session) => (session, "CUDA"),
-            Err(cuda) => {
-                eprintln!("video CUDA unavailable, falling back to CPU: {cuda}");
-                (build(false)?, "CPU")
-            }
+        let (session, provider) = match backend {
+            "cpu" => (build(CPU::default().build())?, "CPU"),
+            "directml" | "intel" => match build(DirectML::default().build().error_on_failure()) {
+                Ok(session) => (session, "DirectML"),
+                Err(dml) => {
+                    eprintln!("video DirectML unavailable, falling back to CPU: {dml}");
+                    (build(CPU::default().build())?, "CPU")
+                }
+            },
+            _ => match build(CUDA::default().build().error_on_failure()) {
+                Ok(session) => (session, "CUDA"),
+                Err(cuda) => match build(DirectML::default().build().error_on_failure()) {
+                    Ok(session) => (session, "DirectML"),
+                    Err(dml) => {
+                        eprintln!("video CUDA/DirectML unavailable, falling back to CPU: CUDA={cuda}; DirectML={dml}");
+                        (build(CPU::default().build())?, "CPU")
+                    }
+                },
+            },
         };
         let input_name = session
             .inputs()

@@ -21,9 +21,15 @@ pub struct ClipInfo {
     pub path: PathBuf,
     pub coded_width: u32,
     pub coded_height: u32,
-    /// Square-pixel processing dimensions after applying sample aspect ratio.
+    /// Square-pixel processing dimensions after applying sample aspect ratio
+    /// and any reframing crop. Everything downstream works at this size.
     pub width: u32,
     pub height: u32,
+    /// Square-pixel size of the whole picture, before reframing.
+    pub full_width: u32,
+    pub full_height: u32,
+    /// Top-left of the reframing crop inside the full picture, when cropped.
+    pub crop: Option<(u32, u32)>,
     pub sample_aspect_ratio: String,
     /// Exact CFR used at the raw-frame boundary, e.g. `24000/1001`.
     pub fps_rate: String,
@@ -69,7 +75,11 @@ pub fn detect_interlacing(path: &std::path::Path) -> bool {
     let Ok(out) = out else { return false };
     let text = String::from_utf8_lossy(&out.stderr);
 
-    let Some(line) = text.lines().rev().find(|l| l.contains("Multi frame detection")) else {
+    let Some(line) = text
+        .lines()
+        .rev()
+        .find(|l| l.contains("Multi frame detection"))
+    else {
         return false;
     };
     let field = |key: &str| -> f64 {
@@ -123,6 +133,8 @@ impl SourceTreatment {
             // TV — shot on film. Scripted drama through the mid-2000s, which
             // includes a lot of DVD-era 4:3 television.
             2 => FieldPolicy::InverseTelecine,
+            // Anime on NTSC DVD and broadcast: 24 fps cels with 3:2 pulldown.
+            6 => FieldPolicy::InverseTelecine,
             // TV — shot on video. Soaps, news, much British television.
             3 => FieldPolicy::Deinterlace,
             _ => FieldPolicy::None,
@@ -206,12 +218,68 @@ impl ClipInfo {
     /// explicitly so preview and export see identical square-pixel CFR frames.
     pub fn decode_filter(&self, treatment: SourceTreatment) -> String {
         let mut filters = treatment.filters(self);
-        let geometry = format!(
-            "scale={}:{}:flags=lanczos,setsar=1,fps={}",
-            self.width, self.height, self.fps_rate
-        );
-        filters.push(geometry);
+        filters.push(self.geometry(self.width, self.height));
+        filters.push(format!("fps={}", self.fps_rate));
         filters.join(",")
+    }
+
+    /// Square pixels, then the reframing crop, then `width`×`height`.
+    fn geometry(&self, width: u32, height: u32) -> String {
+        match self.crop {
+            Some((x, y)) => {
+                let mut chain = format!(
+                    "scale={}:{}:flags=lanczos,setsar=1,crop={}:{}:{x}:{y}",
+                    self.full_width, self.full_height, self.width, self.height
+                );
+                if (width, height) != (self.width, self.height) {
+                    chain.push_str(&format!(",scale={width}:{height}:flags=lanczos"));
+                }
+                chain
+            }
+            None => format!("scale={width}:{height}:flags=lanczos,setsar=1"),
+        }
+    }
+
+    /// Reframes the picture. `frame` 0 keeps the original shape; 1 crops to
+    /// 16:9 for widescreen sets. A 4:3 picture loses height, and `position`
+    /// places the window from top (0) through centre (0.5) to bottom (1). A
+    /// picture wider than 16:9 is trimmed evenly at the sides instead.
+    ///
+    /// Cropping before the upscale gives the same pixels as cropping after
+    /// it, without spending model time on rows that are thrown away.
+    pub fn reframe(&mut self, frame: i32, position: f32) {
+        let (full_width, full_height) = (self.full_width, self.full_height);
+        self.width = full_width;
+        self.height = full_height;
+        self.crop = None;
+        if frame != 1 || full_width < 2 || full_height < 2 {
+            return;
+        }
+        let even = |value: u64| (value as u32 & !1).max(2);
+        if full_width as u64 * 9 > full_height as u64 * 16 {
+            let width = even(full_height as u64 * 16 / 9);
+            if width < full_width {
+                self.width = width;
+                self.crop = Some(((full_width - width) / 2 & !1, 0));
+            }
+        } else {
+            let height = even(full_width as u64 * 9 / 16);
+            if height < full_height {
+                let spare = (full_height - height) as f32;
+                let y = (spare * position.clamp(0.0, 1.0)).round() as u32 & !1;
+                self.height = height;
+                self.crop = Some((0, y.min(full_height - height)));
+            }
+        }
+    }
+
+    /// Whether an external decoder (Video2X) would see a different picture
+    /// than `decode_filter` produces: field treatment, restore filters, or
+    /// non-square pixels such as 8:9 DVD.
+    pub fn needs_prepare(&self, treatment: SourceTreatment) -> bool {
+        !treatment.filters(self).is_empty()
+            || self.sample_aspect_ratio != "1:1"
+            || self.crop.is_some()
     }
 
     /// What the container claims.
@@ -257,6 +325,26 @@ pub fn ffmpeg() -> PathBuf {
 
 pub fn ffprobe() -> PathBuf {
     bin_dir().join("ffprobe.exe")
+}
+
+/// A small rgb24 thumbnail `height` pixels tall at `at_secs`, square-pixel
+/// corrected. Works for stills too. Returns (width, pixels).
+pub fn thumbnail_rgb(path: &std::path::Path, at_secs: f64, height: u32) -> Result<(u32, Vec<u8>), String> {
+    let mut cmd = Command::new(ffmpeg());
+    quiet(&mut cmd).args(["-v", "error", "-ss", &format!("{:.3}", at_secs.max(0.0))]);
+    cmd.arg("-i").arg(path).args(["-frames:v", "1", "-vf"]);
+    cmd.arg(format!(
+        "scale=trunc(iw*sar/2)*2:ih,setsar=1,scale=-2:{height}:flags=bicubic"
+    ));
+    let out = cmd
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .map_err(|e| format!("could not run ffmpeg: {e}"))?;
+    let row = height as usize * 3;
+    if !out.status.success() || out.stdout.is_empty() || out.stdout.len() % row != 0 {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(((out.stdout.len() / row) as u32, out.stdout))
 }
 
 fn quiet(cmd: &mut Command) -> &mut Command {
@@ -365,6 +453,9 @@ pub fn probe(path: &std::path::Path) -> Result<ClipInfo, String> {
         coded_height,
         width,
         height,
+        full_width: width,
+        full_height: height,
+        crop: None,
         sample_aspect_ratio,
         fps_rate,
         fps,
@@ -418,8 +509,7 @@ pub fn frame_at_with(
     cmd.arg("-i").arg(&clip.path).args(["-frames:v", "1"]);
 
     let mut filters = treatment.filters(clip);
-    let geometry = format!("scale={w}:{h}:flags=lanczos,setsar=1");
-    filters.push(geometry);
+    filters.push(clip.geometry(w, h));
     let filter = filters.join(",");
     cmd.args(["-vf", &filter]);
 
@@ -583,7 +673,9 @@ mod tests {
     use super::*;
 
     fn asset(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(name)
     }
 
     fn telecined_clip() -> (PathBuf, ClipInfo) {
@@ -597,12 +689,7 @@ mod tests {
         let status = quiet(&mut Command::new(ffmpeg()))
             .args(["-v", "error", "-y", "-i"])
             .arg(&source)
-            .args([
-                "-vf",
-                "telecine=first_field=top:pattern=23",
-                "-c:v",
-                "ffv1",
-            ])
+            .args(["-vf", "telecine=first_field=top:pattern=23", "-c:v", "ffv1"])
             .arg(&out)
             .status()
             .expect("apply telecine");
@@ -673,6 +760,40 @@ mod tests {
                 "content profile {content} touched a progressive source"
             );
         }
+    }
+
+    #[test]
+    fn reframe_crops_four_three_to_sixteen_nine() {
+        let mut clip = ClipInfo {
+            path: PathBuf::from("episode.mkv"),
+            coded_width: 1440,
+            coded_height: 1080,
+            width: 1440,
+            height: 1080,
+            full_width: 1440,
+            full_height: 1080,
+            crop: None,
+            sample_aspect_ratio: "1:1".into(),
+            fps_rate: "24000/1001".into(),
+            fps: 23.976,
+            frames: 1,
+            duration: 1.0,
+            codec: "h264".into(),
+            pix_fmt: "yuv420p".into(),
+            field_order: "progressive".into(),
+            detected_fields: Default::default(),
+        };
+        clip.reframe(1, 0.5);
+        assert_eq!((clip.width, clip.height, clip.crop), (1440, 810, Some((0, 134))));
+        assert!(clip
+            .decode_filter(SourceTreatment::default())
+            .ends_with("scale=1440:1080:flags=lanczos,setsar=1,crop=1440:810:0:134,fps=24000/1001"));
+        clip.reframe(1, 0.0);
+        assert_eq!(clip.crop, Some((0, 0)));
+        clip.reframe(1, 1.0);
+        assert_eq!(clip.crop, Some((0, 270)));
+        clip.reframe(0, 0.5);
+        assert_eq!((clip.width, clip.height, clip.crop), (1440, 1080, None));
     }
 
     #[test]

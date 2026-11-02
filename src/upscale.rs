@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ort::ep::{ExecutionProviderDispatch, CPU, CUDA};
+use ort::ep::{DirectML, ExecutionProviderDispatch, CPU, CUDA};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use rayon::prelude::*;
@@ -351,10 +351,18 @@ pub enum Engine {
 
 impl Engine {
     pub fn load(entry: &ModelEntry, fp16: bool) -> Result<Self, String> {
+        Self::load_with_backend(entry, fp16, "auto")
+    }
+
+    pub fn load_with_backend(
+        entry: &ModelEntry,
+        fp16: bool,
+        backend: &str,
+    ) -> Result<Self, String> {
         if entry.is_video() {
-            crate::video::VideoUpscaler::load(entry).map(Self::Video)
+            crate::video::VideoUpscaler::load_with_backend(entry, backend).map(Self::Video)
         } else {
-            Upscaler::load(entry, fp16).map(Self::Frame)
+            Upscaler::load_with_backend(entry, fp16, backend).map(Self::Frame)
         }
     }
 
@@ -429,6 +437,14 @@ impl Upscaler {
     }
 
     pub fn load(entry: &ModelEntry, fp16: bool) -> Result<Self, String> {
+        Self::load_with_backend(entry, fp16, "auto")
+    }
+
+    pub fn load_with_backend(
+        entry: &ModelEntry,
+        fp16: bool,
+        backend: &str,
+    ) -> Result<Self, String> {
         if Path::new(&entry.file).extension().and_then(|e| e.to_str()) == Some("pth") {
             let (session, scale, provider) = pth::load_rrdb(&models_dir().join(&entry.file))?;
             let input_name = session
@@ -445,7 +461,7 @@ impl Upscaler {
         }
         if fp16 {
             if let Some(f) = entry.fp16_file.as_ref() {
-                match Self::load_path(&models_dir().join(f), entry.scale) {
+                match Self::load_path_with_backend(&models_dir().join(f), entry.scale, backend) {
                     Ok(u) => return Ok(u),
                     // A half export that this driver or provider won't run
                     // should cost speed, not the whole render.
@@ -453,21 +469,41 @@ impl Upscaler {
                 }
             }
         }
-        Self::load_path(&models_dir().join(&entry.file), entry.scale)
+        Self::load_path_with_backend(&models_dir().join(&entry.file), entry.scale, backend)
     }
 
     pub fn load_path(path: &Path, scale: u32) -> Result<Self, String> {
+        Self::load_path_with_backend(path, scale, "auto")
+    }
+
+    pub fn load_path_with_backend(path: &Path, scale: u32, backend: &str) -> Result<Self, String> {
         // Ask for CUDA and make registration failure loud, so a missing CUDA
         // runtime falls back to CPU here rather than silently running at
         // one-thirtieth the speed with no explanation.
-        let (session, provider) =
-            match build(path, vec![CUDA::default().build().error_on_failure()]) {
+        let (session, provider) = match backend {
+            "cpu" => (build(path, vec![CPU::default().build()])?, "CPU"),
+            "directml" | "intel" => {
+                match build(path, vec![DirectML::default().build().error_on_failure()]) {
+                    Ok(s) => (s, "DirectML"),
+                    Err(dml_err) => {
+                        eprintln!("DirectML unavailable, falling back to CPU: {dml_err}");
+                        (build(path, vec![CPU::default().build()])?, "CPU")
+                    }
+                }
+            }
+            _ => match build(path, vec![CUDA::default().build().error_on_failure()]) {
                 Ok(s) => (s, "CUDA"),
                 Err(cuda_err) => {
-                    eprintln!("CUDA unavailable, falling back to CPU: {cuda_err}");
-                    (build(path, vec![CPU::default().build()])?, "CPU")
+                    match build(path, vec![DirectML::default().build().error_on_failure()]) {
+                        Ok(s) => (s, "DirectML"),
+                        Err(dml_err) => {
+                            eprintln!("CUDA/DirectML unavailable, falling back to CPU: CUDA={cuda_err}; DirectML={dml_err}");
+                            (build(path, vec![CPU::default().build()])?, "CPU")
+                        }
+                    }
                 }
-            };
+            },
+        };
 
         let input_name = session
             .inputs()

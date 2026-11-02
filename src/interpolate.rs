@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ort::ep::CUDA;
+use ort::ep::{DirectML, ExecutionProviderDispatch, CPU, CUDA};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use rayon::prelude::*;
@@ -44,6 +44,41 @@ pub struct Rife {
 
 impl Rife {
     pub fn load() -> Result<Self, String> {
+        Self::load_with_cuda(true)
+    }
+
+    /// Standard interpolation path: prefer CUDA, then DirectML, then CPU.
+    /// The caller still receives the provider actually selected so export and
+    /// status reporting remain truthful when a GPU provider is unavailable.
+    pub fn load_preferred() -> Result<Self, String> {
+        Self::load().or_else(|cuda| {
+            Self::load_directml().or_else(|directml| {
+                Self::load_cpu()
+                    .map_err(|cpu| format!("CUDA: {cuda}; DirectML: {directml}; CPU: {cpu}"))
+            })
+        })
+    }
+
+    pub fn load_cpu() -> Result<Self, String> {
+        Self::load_with_cuda(false)
+    }
+
+    pub fn load_directml() -> Result<Self, String> {
+        Self::load_with_provider(DirectML::default().build().error_on_failure(), "DirectML")
+    }
+
+    fn load_with_cuda(use_cuda: bool) -> Result<Self, String> {
+        if use_cuda {
+            Self::load_with_provider(CUDA::default().build().error_on_failure(), "CUDA")
+        } else {
+            Self::load_with_provider(CPU::default().build(), "CPU")
+        }
+    }
+
+    fn load_with_provider(
+        provider: ExecutionProviderDispatch,
+        provider_name: &'static str,
+    ) -> Result<Self, String> {
         let path = model_path();
         if !path.is_file() {
             return Err(format!("RIFE model not found at {}", path.display()));
@@ -53,8 +88,8 @@ impl Rife {
             .map_err(|e| format!("RIFE session builder: {e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| format!("RIFE optimization: {e}"))?
-            .with_execution_providers(vec![CUDA::default().build().error_on_failure()])
-            .map_err(|e| format!("RIFE CUDA registration: {e}"))?
+            .with_execution_providers(vec![provider])
+            .map_err(|e| format!("RIFE execution-provider registration: {e}"))?
             .commit_from_file(&path)
             .map_err(|e| format!("loading {}: {e}", path.display()))?;
 
@@ -79,7 +114,7 @@ impl Rife {
             session,
             input_name,
             timestep_name,
-            provider: "CUDA",
+            provider: provider_name,
         })
     }
 

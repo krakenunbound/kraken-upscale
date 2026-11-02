@@ -62,7 +62,8 @@ impl Stages {
         let before = self.model.get();
         let out = accumulate(&self.model, f);
         if self.frames.get() == 0 {
-            self.model_first.set(self.model.get().saturating_sub(before));
+            self.model_first
+                .set(self.model.get().saturating_sub(before));
         }
         out
     }
@@ -219,7 +220,10 @@ mod tests {
             .and_then(|t| t.split("ms").next())
             .and_then(|t| t.parse().ok())
             .expect("steady figure present");
-        assert!((5.0..20.0).contains(&steady), "steady was {steady}ms: {text}");
+        assert!(
+            (5.0..20.0).contains(&steady),
+            "steady was {steady}ms: {text}"
+        );
     }
 
     #[test]

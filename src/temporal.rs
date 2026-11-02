@@ -845,8 +845,8 @@ mod tests {
     /// Needs no GPU — flow and cut detection are CPU work.
     #[test]
     fn hard_cut_releases_the_lock_on_real_footage() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/hardcut-test.mp4");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/hardcut-test.mp4");
         if !path.is_file() {
             panic!("missing test asset: {}", path.display());
         }
@@ -916,8 +916,7 @@ mod tests {
         for sample in 0..SAMPLES {
             let index = (sample as u64 * span / SAMPLES as u64) as u32;
             let prev = crate::media::frame_at(&clip, index as f64 * step, None).expect("prev");
-            let cur =
-                crate::media::frame_at(&clip, (index + 1) as f64 * step, None).expect("cur");
+            let cur = crate::media::frame_at(&clip, (index + 1) as f64 * step, None).expect("cur");
 
             let started = std::time::Instant::now();
             let motion = analyze(&prev, &cur).expect("analyze");

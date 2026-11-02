@@ -1,0 +1,2 @@
+# Official Model Context Protocol Python SDK. Keep the tested major version.
+mcp>=1.26,<2

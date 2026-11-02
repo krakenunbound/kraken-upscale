@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use slint::{Image, Model, ModelRc, Rgb8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
+mod catalog;
 mod cuda;
 mod dnd;
 mod export;
@@ -17,6 +18,8 @@ mod generative;
 mod gpu;
 mod image_mode;
 mod interpolate;
+mod mcp;
+mod mcp_transport;
 mod media;
 mod pth;
 mod resolution;
@@ -26,6 +29,7 @@ mod stages;
 mod temporal;
 mod upscale;
 mod video;
+mod video2x;
 
 slint::include_modules!();
 
@@ -82,6 +86,325 @@ const SAMPLE_AFTER_PAUSE_MS: u64 = 2000;
 /// Scrub idle: much shorter; they already chose a frame.
 const SAMPLE_AFTER_SCRUB_MS: u64 = 400;
 
+/// Headless bridge used by Maelstrom's Enhance workspace. This reuses the
+/// streaming export engine instead of maintaining a second VSR/RIFE pipeline.
+fn run_maelstrom_enhance_cli(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if args.len() < 5 {
+        return Err(
+            "usage: --maelstrom-enhance <input> <output> <scale> [fps] [quality] [backend] [codec] [model]"
+                .into(),
+        );
+    }
+    let input = std::path::PathBuf::from(&args[2]);
+    let output = std::path::PathBuf::from(&args[3]);
+    let target_scale = args[4]
+        .to_string_lossy()
+        .parse::<u32>()
+        .map_err(|_| "target must be 720, 1080, 1440, 2160, 2, 3, or 4".to_string())?;
+    if !matches!(target_scale, 720 | 1080 | 1440 | 2160 | 2 | 3 | 4) {
+        return Err("target must be 720, 1080, 1440, 2160, 2, 3, or 4".into());
+    }
+    let clip = media::probe(&input)?;
+    let interpolation_fps = args
+        .get(5)
+        .and_then(|value| value.to_string_lossy().parse::<u32>().ok())
+        .filter(|fps| *fps as f64 > clip.fps);
+    let quality = rtx_vsr::Quality::from_index(
+        args.get(6)
+            .and_then(|value| value.to_string_lossy().parse::<i32>().ok())
+            .unwrap_or(3),
+    );
+    let requested_backend = args
+        .get(7)
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| "auto".into());
+    let requested_codec = args
+        .get(8)
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| "h264".into());
+    let hevc = matches!(requested_codec.as_str(), "h265" | "hevc");
+    let requested_model = args
+        .get(9)
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "auto".into());
+    let use_rtx =
+        rtx_vsr::available() && requested_backend != "cpu" && requested_backend != "intel";
+    let models = upscale::registry();
+    let model =
+        select_enhance_model(&models, &requested_model).unwrap_or_else(rtx_placeholder_model);
+    let spec = export::ExportSpec {
+        clip,
+        model: model.clone(),
+        target_scale,
+        strength: 1.0,
+        detail_limit: 0.35,
+        source_treatment: media::SourceTreatment::default(),
+        match_color: !use_rtx,
+        stability: !use_rtx,
+        lock_strength: 0.65,
+        cut_detect: 0.32,
+        interpolation_fps,
+        fp16: true,
+        tile: recommended_tile(),
+        out_path: output,
+        codec: if use_rtx {
+            if hevc {
+                "hevc_nvenc".into()
+            } else {
+                "h264_nvenc".into()
+            }
+        } else {
+            if hevc {
+                "hevc_mf".into()
+            } else {
+                "h264_mf".into()
+            }
+        },
+        cq: 18,
+        copy_audio: true,
+        audio_aac: false,
+        rtx_quality: use_rtx.then_some(quality),
+    };
+    let progress_path = std::path::PathBuf::from(format!("{}.progress", spec.out_path.display()));
+    let _ = std::fs::write(&progress_path, b"0");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut progress = |done: u64, total: u64| {
+        let percent = if total == 0 {
+            0
+        } else {
+            done.saturating_mul(100) / total
+        };
+        let _ = std::fs::write(&progress_path, percent.to_string());
+        println!("MAELSTROM_PROGRESS {done} {total}");
+    };
+    if use_rtx {
+        let mut rife = interpolation_fps
+            .map(|_| interpolate::Rife::load_preferred())
+            .transpose()?;
+        export::run(
+            &spec,
+            None,
+            rife.as_mut(),
+            spec.tile,
+            OVERLAP,
+            cancel,
+            &mut progress,
+        )
+        .map_err(|error| format!("RTX VSR export failed: {error}"))?;
+    } else {
+        let fallback_backend = if requested_backend == "cpu" {
+            "cpu"
+        } else {
+            "directml"
+        };
+        let mut engine = upscale::Engine::load_with_backend(&model, true, fallback_backend)
+            .map_err(|error| format!("DirectML/CPU fallback unavailable: {error}"))?;
+        let mut rife = interpolation_fps
+            .map(|_| {
+                if requested_backend == "cpu" {
+                    interpolate::Rife::load_cpu()
+                } else {
+                    interpolate::Rife::load_directml().or_else(|dml| {
+                        interpolate::Rife::load_cpu()
+                            .map_err(|cpu| format!("DirectML: {dml}; CPU: {cpu}"))
+                    })
+                }
+            })
+            .transpose()?;
+        export::run(
+            &spec,
+            Some(&mut engine),
+            rife.as_mut(),
+            spec.tile,
+            OVERLAP,
+            cancel,
+            &mut progress,
+        )
+        .map_err(|error| format!("fallback enhance export failed: {error}"))?;
+    }
+    let _ = std::fs::remove_file(&progress_path);
+    println!("MAELSTROM_ENHANCE_DONE {}", spec.out_path.display());
+    Ok(())
+}
+
+/// Applies the Frame control to the loaded clip, so every consumer of its
+/// size (preview, playback, all pipelines) sees the same reframed picture.
+fn reframe_clip(clip: &RefCell<Option<media::ClipInfo>>, ui: &MainWindow) {
+    if let Some(info) = clip.borrow_mut().as_mut() {
+        info.reframe(ui.get_frame_index(), ui.get_crop_position());
+    }
+}
+
+fn audio_label(spec: &export::ExportSpec) -> &'static str {
+    match (spec.copy_audio, spec.audio_aac) {
+        (false, _) => "none",
+        (true, true) => "AAC 320k",
+        (true, false) => "copy",
+    }
+}
+
+fn clip_cards(ui: &MainWindow) -> Option<ModelRc<ClipCard>> {
+    let model = ui.get_clips();
+    model
+        .as_any()
+        .downcast_ref::<VecModel<ClipCard>>()
+        .is_some()
+        .then_some(model)
+}
+
+fn format_length(secs: f64) -> String {
+    let total = secs.max(0.0).round() as u64;
+    let (h, m, s) = (total / 3600, total / 60 % 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Adds a filmstrip card once per path; the thumbnail arrives later from a
+/// background ffmpeg grab so a large drop never stalls the window.
+fn add_clip_card(ui: &MainWindow, path: &std::path::Path, length: Option<f64>) {
+    let Some(model) = clip_cards(ui) else { return };
+    let key = path.display().to_string();
+    if model.iter().any(|card| card.path == key) {
+        return;
+    }
+    let Some(cards) = model.as_any().downcast_ref::<VecModel<ClipCard>>() else {
+        return;
+    };
+    cards.push(ClipCard {
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into(),
+        path: key.clone().into(),
+        length: length.map(format_length).unwrap_or_default().into(),
+        thumb: Image::default(),
+        active: false,
+    });
+    let handle = ui.as_weak();
+    let path = path.to_path_buf();
+    let at = length.map(|secs| (secs * 0.1).min(60.0)).unwrap_or(0.0);
+    std::thread::spawn(move || {
+        let Ok((width, rgb)) = media::thumbnail_rgb(&path, at, 80) else {
+            return;
+        };
+        let mut buf = SharedPixelBuffer::<Rgb8Pixel>::new(width, 80);
+        buf.make_mut_bytes().copy_from_slice(&rgb);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = handle.upgrade() else { return };
+            let model = ui.get_clips();
+            let Some(cards) = model.as_any().downcast_ref::<VecModel<ClipCard>>() else {
+                return;
+            };
+            for row in 0..cards.row_count() {
+                if let Some(mut card) = cards.row_data(row) {
+                    if card.path == key {
+                        card.thumb = Image::from_rgb8(buf);
+                        cards.set_row_data(row, card);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+}
+
+fn mark_active_card(ui: &MainWindow, path: &std::path::Path) {
+    let model = ui.get_clips();
+    let Some(cards) = model.as_any().downcast_ref::<VecModel<ClipCard>>() else {
+        return;
+    };
+    let key = path.display().to_string();
+    for row in 0..cards.row_count() {
+        if let Some(mut card) = cards.row_data(row) {
+            let active = card.path == key;
+            if card.active != active {
+                card.active = active;
+                cards.set_row_data(row, card);
+            }
+        }
+    }
+}
+
+/// Orders "Episode 2" before "Episode 10".
+fn natural_cmp(a: &std::path::Path, b: &std::path::Path) -> std::cmp::Ordering {
+    fn chunks(path: &std::path::Path) -> Vec<(u64, String)> {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        let mut digits = String::new();
+        let mut text = String::new();
+        for ch in name.chars() {
+            if ch.is_ascii_digit() {
+                if !text.is_empty() {
+                    out.push((u64::MAX, std::mem::take(&mut text)));
+                }
+                digits.push(ch);
+            } else {
+                if !digits.is_empty() {
+                    out.push((digits.parse().unwrap_or(u64::MAX), String::new()));
+                    digits.clear();
+                }
+                text.push(ch);
+            }
+        }
+        if !digits.is_empty() {
+            out.push((digits.parse().unwrap_or(u64::MAX), String::new()));
+        }
+        if !text.is_empty() {
+            out.push((u64::MAX, text));
+        }
+        out
+    }
+    chunks(a).cmp(&chunks(b))
+}
+
+fn catalog_row(entry: &catalog::Entry) -> ModelRow {
+    let installed = entry.installed();
+    let manual = !entry.downloadable();
+    ModelRow {
+        name: entry.name.into(),
+        group: entry.group.into(),
+        summary: entry.summary.into(),
+        folder: entry.folder.into(),
+        size: entry.size_label().into(),
+        license: entry.license.into(),
+        status: if installed {
+            "INSTALLED"
+        } else if manual {
+            "MANUAL SETUP"
+        } else {
+            "NOT INSTALLED"
+        }
+        .into(),
+        steps: entry.steps().into(),
+        installed,
+        manual,
+        busy: false,
+        failed: false,
+        progress: 0.0,
+    }
+}
+
+fn refresh_catalog(ui: &MainWindow) {
+    let rows: Vec<ModelRow> = catalog::CATALOG.iter().map(catalog_row).collect();
+    ui.set_models_installed(rows.iter().filter(|row| row.installed).count() as i32);
+    ui.set_catalog(ModelRc::new(VecModel::from(rows)));
+}
+
+fn update_model_row(ui: &MainWindow, index: usize, change: impl FnOnce(&mut ModelRow)) {
+    let model = ui.get_catalog();
+    if let Some(mut row) = model.row_data(index) {
+        change(&mut row);
+        model.set_row_data(index, row);
+    }
+}
+
 fn rtx_placeholder_model() -> upscale::ModelEntry {
     upscale::ModelEntry {
         name: "RTX VSR".into(),
@@ -92,6 +415,25 @@ fn rtx_placeholder_model() -> upscale::ModelEntry {
         temporal_frames: 1,
         video_tuned: true,
     }
+}
+
+fn select_enhance_model(
+    models: &[upscale::ModelEntry],
+    requested: &str,
+) -> Option<upscale::ModelEntry> {
+    let requested = requested.trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("auto") {
+        return models.get(upscale::preferred_default(models)).cloned();
+    }
+    let needle = requested.to_ascii_lowercase();
+    models
+        .iter()
+        .find(|model| {
+            model.name.eq_ignore_ascii_case(requested)
+                || model.name.to_ascii_lowercase().contains(&needle)
+        })
+        .cloned()
+        .or_else(|| models.get(upscale::preferred_default(models)).cloned())
 }
 
 fn recommended_tile() -> u32 {
@@ -133,6 +475,7 @@ struct Job {
     lock_strength: f32,
     cut_detect: f32,
     rtx_quality: Option<rtx_vsr::Quality>,
+    video2x: Option<video2x::Preset>,
 }
 
 #[derive(Clone)]
@@ -155,6 +498,9 @@ enum TaskSpec {
     Image(image_mode::ExportSpec),
     Generative(generative::ExportSpec),
     RtxImage(rtx_vsr::ExportSpec),
+    /// Video2X owns decode, model and encode, so it carries the ordinary
+    /// video spec plus its preset rather than a model.
+    Video2x(export::ExportSpec, video2x::Preset),
 }
 
 enum ExportCommand {
@@ -170,6 +516,7 @@ impl TaskSpec {
             Self::Image(_) => "IMAGE UPSCALE",
             Self::Generative(_) => "GENERATIVE UPSCALE",
             Self::RtxImage(_) => "RTX VSR UPSCALE",
+            Self::Video2x(..) => "VIDEO2X VIDEO",
         }
     }
 
@@ -179,6 +526,7 @@ impl TaskSpec {
             Self::Image(spec) => spec.image.file_name(),
             Self::Generative(spec) => spec.conventional.image.file_name(),
             Self::RtxImage(spec) => spec.image.file_name(),
+            Self::Video2x(spec, _) => spec.clip.file_name(),
         }
     }
 
@@ -188,7 +536,7 @@ impl TaskSpec {
             Self::Video(spec) => Some(&spec.model),
             Self::Image(spec) => Some(&spec.model),
             Self::Generative(spec) => Some(&spec.conventional.model),
-            Self::RtxImage(_) => None,
+            Self::RtxImage(_) | Self::Video2x(..) => None,
         }
     }
 
@@ -198,7 +546,7 @@ impl TaskSpec {
             Self::Video(spec) => Some(spec.fp16),
             Self::Image(spec) => Some(spec.fp16),
             Self::Generative(spec) => Some(spec.conventional.fp16),
-            Self::RtxImage(_) => None,
+            Self::RtxImage(_) | Self::Video2x(..) => None,
         }
     }
 
@@ -208,6 +556,7 @@ impl TaskSpec {
             Self::Image(spec) => &spec.out_path,
             Self::Generative(spec) => spec.out_path(),
             Self::RtxImage(spec) => &spec.out_path,
+            Self::Video2x(spec, _) => &spec.out_path,
         }
     }
 }
@@ -264,6 +613,9 @@ fn source_treatment_description(
         2 => "TV — shot on film",
         3 => "TV — shot on video",
         4 => "Modern digital",
+        5 => "Anime — remaster / Blu-ray",
+        6 => "Anime — DVD / TV broadcast",
+        7 => "Anime — modern digital",
         _ => "unknown",
     };
     let restore = match treatment.restore {
@@ -329,6 +681,14 @@ fn models_for_mode(all: &[upscale::ModelEntry], mode: i32) -> Vec<upscale::Model
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|arg| arg == "--maelstrom-enhance") {
+        if let Err(error) = run_maelstrom_enhance_cli(&args) {
+            eprintln!("MAELSTROM_ENHANCE_ERROR {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // Must happen before any ONNX Runtime session is created, which is before
     // the window exists — so this result is logged once the UI is up.
     let cuda_dir = cuda::prepare();
@@ -336,6 +696,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
     ui.set_interp_available(interpolate::available());
     ui.set_tasks(ModelRc::new(VecModel::<TaskRow>::from(Vec::new())));
+    ui.set_clips(ModelRc::new(VecModel::<ClipCard>::from(Vec::new())));
+    refresh_catalog(&ui);
     ui.set_log_lines(ModelRc::new(VecModel::<slint::SharedString>::from(
         Vec::new(),
     )));
@@ -435,10 +797,30 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     let rtx_vsr_ready = rtx_vsr::available();
     ui.set_rtx_vsr_ready(rtx_vsr_ready);
-    ui.set_video_pipeline_index(if saved.video_pipeline_index == 1 && !rtx_vsr_ready {
-        0
-    } else {
-        saved.video_pipeline_index.clamp(0, 1)
+    let video2x_ready = video2x::available();
+    ui.set_video2x_ready(video2x_ready);
+    ui.set_video2x_preset_names(ModelRc::new(VecModel::from(
+        video2x::PRESETS
+            .iter()
+            .map(|preset| SharedString::from(preset.label))
+            .collect::<Vec<_>>(),
+    )));
+    ui.set_video2x_preset_notes(ModelRc::new(VecModel::from(
+        video2x::PRESETS
+            .iter()
+            .map(|preset| SharedString::from(preset.note))
+            .collect::<Vec<_>>(),
+    )));
+    ui.set_video2x_preset_index(
+        video2x::PRESETS
+            .iter()
+            .position(|preset| preset.label == saved.video2x_preset)
+            .unwrap_or(2) as i32,
+    );
+    ui.set_video_pipeline_index(match saved.video_pipeline_index.clamp(0, 2) {
+        1 if !rtx_vsr_ready => 0,
+        2 if !video2x_ready => 0,
+        index => index,
     });
     ui.set_image_pipeline_index(if saved.image_pipeline_index == 2 && !rtx_vsr_ready {
         0
@@ -476,6 +858,14 @@ fn main() -> Result<(), slint::PlatformError> {
             "NVIDIA RTX VSR: optional runtime missing".into()
         },
     );
+    log(
+        &logger,
+        if let Some(path) = video2x::runtime_dir() {
+            format!("Video2X: ready · {}", path.display())
+        } else {
+            "Video2X: optional runtime missing".into()
+        },
+    );
     let initial_mode = saved.mode_index.clamp(0, 1);
     ui.set_mode_index(initial_mode);
     let initial_models = if initial_mode == 0 {
@@ -507,7 +897,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_right_panel(-1);
     ui.set_video_format_index(saved.video_format_index.clamp(0, 3));
     ui.set_video_quality_index(saved.video_quality_index.clamp(0, 2));
-    ui.set_audio_index(saved.audio_index.clamp(0, 1));
+    ui.set_audio_index(saved.audio_index.clamp(0, 2));
     ui.set_image_format_index(saved.image_format_index.clamp(0, 2));
     ui.set_strength(saved.strength);
     ui.set_detail_limit(saved.detail_limit);
@@ -515,6 +905,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_auto_tile(saved.auto_tile);
     ui.set_content_index(saved.content_index);
     ui.set_restore_index(saved.restore_index);
+    ui.set_frame_index(saved.frame_index.clamp(0, 1));
+    ui.set_batch_height(saved.batch_height.clamp(110.0, 1200.0));
+    ui.set_crop_position(saved.crop_position.clamp(0.0, 1.0));
     ui.set_detect_fields(saved.detect_fields);
     ui.set_preserve_grain(saved.preserve_grain);
     ui.set_match_color(saved.match_color);
@@ -577,18 +970,21 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let rtx_video = ui.get_mode_index() == 0 && ui.get_video_pipeline_index() == 1;
             let rtx_image = ui.get_mode_index() == 1 && ui.get_image_pipeline_index() == 2;
+            let video2x_preset = (ui.get_mode_index() == 0 && ui.get_video_pipeline_index() == 2)
+                .then(|| video2x::preset(ui.get_video2x_preset_index()));
             let selected_model = active_models
                 .borrow()
                 .get(ui.get_model_index().max(0) as usize)
                 .cloned();
             let Some(model) = selected_model.or_else(|| {
-                (rtx_video || rtx_image).then(rtx_placeholder_model)
+                (rtx_video || rtx_image || video2x_preset.is_some()).then(rtx_placeholder_model)
             }) else {
                 return;
             };
             ui.set_model_note(upscale::guidance(&model.name).into());
-            ui.set_model_is_video(model.is_video() || rtx_video);
+            ui.set_model_is_video(model.is_video() || rtx_video || video2x_preset.is_some());
             ui.set_model_video_tuned(model.video_tuned);
+            reframe_clip(&clip, &ui);
             let target_scale = resolution::from_index(ui.get_resolution_index());
             let source_size = if ui.get_mode_index() == 1 {
                 still
@@ -636,9 +1032,14 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 };
                 ui.set_scale_note(
-                    upscale::scale_advice(&model, working_scale, &active_models.borrow())
-                        .unwrap_or_default()
-                        .into(),
+                    match video2x_preset {
+                        Some(preset) => preset.scale_note(working_scale),
+                        None => {
+                            upscale::scale_advice(&model, working_scale, &active_models.borrow())
+                                .unwrap_or_default()
+                        }
+                    }
+                    .into(),
                 );
             }
 
@@ -719,16 +1120,18 @@ fn main() -> Result<(), slint::PlatformError> {
             }
 
             let at_secs = ui.get_playhead().clamp(0.0, 1.0) as f64 * info.duration;
-            let rtx_quality = rtx_video
-                .then(|| rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index()));
+            let rtx_quality =
+                rtx_video.then(|| rtx_vsr::Quality::from_index(ui.get_rtx_vsr_quality_index()));
             ui.set_out_badge(
                 format!(
                     "{} × {} · {}{}",
                     output_width,
                     output_height,
-                    rtx_quality
-                        .map(|quality| format!("RTX VSR {}", quality.label()))
-                        .unwrap_or_else(|| model.name.clone()),
+                    match (rtx_quality, video2x_preset) {
+                        (Some(quality), _) => format!("RTX VSR {}", quality.label()),
+                        (None, Some(preset)) => format!("Video2X {}", preset.label),
+                        (None, None) => model.name.clone(),
+                    },
                     interpolation_fps
                         .map(|fps| format!(" · {fps} fps RIFE"))
                         .unwrap_or_default()
@@ -738,6 +1141,8 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_preview_status(
                 if rtx_video {
                     "running NVIDIA RTX VSR preview…"
+                } else if video2x_preset.is_some() {
+                    "running Video2X preview…"
                 } else {
                     "upscaling sample frame…"
                 }
@@ -780,10 +1185,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 } else {
                     SAFE_TILE
                 },
-                stability: ui.get_stability_on() && !model.is_video() && !rtx_video,
+                stability: ui.get_stability_on()
+                    && !model.is_video()
+                    && !rtx_video
+                    && video2x_preset.is_none(),
                 lock_strength: ui.get_lock(),
                 cut_detect: ui.get_cut_detect(),
                 rtx_quality,
+                video2x: video2x_preset,
             });
         }
     };
@@ -829,6 +1238,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         );
                         *still.borrow_mut() = Some(info.clone());
                         load_image(&ui, &info);
+                        add_clip_card(&ui, &path, None);
+                        mark_active_card(&ui, &path);
                         request();
                     }
                     Err(error) => {
@@ -842,7 +1253,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             match media::probe(&path) {
-                Ok(info) => {
+                Ok(mut info) => {
+                    info.reframe(ui.get_frame_index(), ui.get_crop_position());
                     log(
                         &ui.as_weak(),
                         format!(
@@ -858,6 +1270,8 @@ fn main() -> Result<(), slint::PlatformError> {
                         ),
                     );
                     load_clip(&ui, &info);
+                    add_clip_card(&ui, &info.path, Some(info.duration));
+                    mark_active_card(&ui, &info.path);
                     let generation = before_generation.fetch_add(1, Ordering::Relaxed) + 1;
                     let _ = before_tx.send(BeforeJob {
                         generation,
@@ -977,12 +1391,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 before_generation.fetch_add(1, Ordering::Relaxed);
                 let Some(ui) = handle.upgrade() else { return };
                 ui.set_preview_status("playing source…".into());
+                reframe_clip(&clip, &ui);
                 let Some(info) = clip.borrow().clone() else {
                     ui.set_playing(false);
                     return;
                 };
-                let start_secs =
-                    ui.get_playhead().clamp(0.0, 1.0) as f64 * info.duration;
+                let start_secs = ui.get_playhead().clamp(0.0, 1.0) as f64 * info.duration;
                 playback.start(
                     info,
                     start_secs,
@@ -1202,6 +1616,346 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // ── Models tab ──────────────────────────────────────────────────────
+    let model_cancel: Arc<Vec<AtomicBool>> = Arc::new(
+        catalog::CATALOG.iter().map(|_| AtomicBool::new(false)).collect(),
+    );
+    {
+        let handle = ui.as_weak();
+        let model_cancel = model_cancel.clone();
+        ui.on_model_download(move |index| {
+            let Some(ui) = handle.upgrade() else { return };
+            let index = index.max(0) as usize;
+            let Some(entry) = catalog::CATALOG.get(index) else { return };
+            if ui.get_catalog().row_data(index).is_some_and(|row| row.busy) {
+                return;
+            }
+            model_cancel[index].store(false, Ordering::Relaxed);
+            update_model_row(&ui, index, |row| {
+                row.busy = true;
+                row.failed = false;
+                row.progress = 0.0;
+                row.status = "DOWNLOADING".into();
+            });
+            log(&ui.as_weak(), format!("models: downloading {}", entry.name));
+            let handle = ui.as_weak();
+            let model_cancel = model_cancel.clone();
+            std::thread::spawn(move || {
+                let mut last = u32::MAX;
+                let progress_handle = handle.clone();
+                let mut on_progress = |done: u64, total: u64| {
+                    let percent = if total == 0 {
+                        0
+                    } else {
+                        (done.saturating_mul(100) / total).min(100) as u32
+                    };
+                    if percent == last {
+                        return;
+                    }
+                    last = percent;
+                    let h = progress_handle.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = h.upgrade() {
+                            update_model_row(&ui, index, |row| {
+                                row.progress = percent as f32 / 100.0;
+                                row.status = format!("DOWNLOADING {percent}%").into();
+                            });
+                        }
+                    });
+                };
+                let result = catalog::install(entry, &model_cancel[index], &mut on_progress);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = handle.upgrade() else { return };
+                    match result {
+                        Ok(()) => {
+                            update_model_row(&ui, index, |row| {
+                                *row = catalog_row(entry);
+                            });
+                            ui.set_models_installed(
+                                catalog::CATALOG.iter().filter(|e| e.installed()).count() as i32,
+                            );
+                            ui.set_restart_needed(true);
+                            log(
+                                &ui.as_weak(),
+                                format!(
+                                    "models: installed {} → {}",
+                                    entry.name,
+                                    entry.folder_path().display()
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            let cancelled = error == "cancelled";
+                            update_model_row(&ui, index, |row| {
+                                row.busy = false;
+                                row.progress = 0.0;
+                                row.failed = !cancelled;
+                                row.status = if cancelled { "CANCELLED" } else { "FAILED" }.into();
+                            });
+                            log(
+                                &ui.as_weak(),
+                                format!("models: {} {}: {error}", entry.name,
+                                    if cancelled { "cancelled" } else { "failed" }),
+                            );
+                        }
+                    }
+                });
+            });
+        });
+    }
+    {
+        let model_cancel = model_cancel.clone();
+        ui.on_model_cancel(move |index| {
+            if let Some(flag) = model_cancel.get(index.max(0) as usize) {
+                flag.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+    ui.on_model_page(|index| {
+        if let Some(entry) = catalog::CATALOG.get(index.max(0) as usize) {
+            catalog::open_page(entry.page);
+        }
+    });
+    ui.on_model_folder(|index| {
+        if let Some(entry) = catalog::CATALOG.get(index.max(0) as usize) {
+            catalog::open_folder(entry);
+        }
+    });
+    {
+        // New models and runtimes are discovered at startup. Start a fresh
+        // copy once this one has closed (and saved its settings), so the
+        // control port and GPU are free when it opens.
+        let handle = ui.as_weak();
+        ui.on_restart_app(move || {
+            let Some(ui) = handle.upgrade() else { return };
+            if ui.get_export_running() {
+                ui.set_preview_status("finish or cancel the running upscale before restarting".into());
+                return;
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                let script = format!(
+                    "Start-Sleep -Seconds 2; Start-Process -FilePath '{}'",
+                    exe.display().to_string().replace('\'', "''")
+                );
+                let mut cmd = std::process::Command::new("powershell");
+                cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x0800_0000);
+                }
+                if cmd.spawn().is_ok() {
+                    let _ = ui
+                        .window()
+                        .try_dispatch_event(slint::platform::WindowEvent::CloseRequested);
+                }
+            }
+        });
+    }
+
+    {
+        // Anime profiles carry a recommended setup: faithful settings for line
+        // art and the best installed anime model. Other profiles change only
+        // field handling, as before.
+        let handle = ui.as_weak();
+        let active_models = active_models.clone();
+        ui.on_content_changed(move |content| {
+            let Some(ui) = handle.upgrade() else { return };
+            if content >= 5 && ui.get_mode_index() == 0 {
+                let dvd = content == 6;
+                let preferred: &[&str] = if dvd {
+                    &["AniSD Cel SPAN", "Real-CUGAN Pro Conservative", "Real-CUGAN Pro Conservative 3x"]
+                } else {
+                    &["Real-CUGAN Pro Conservative 3x", "Real-CUGAN Pro Conservative", "Real-ESRGAN AnimeVideo v3"]
+                };
+                let models = active_models.borrow();
+                if let Some(name) = preferred
+                    .iter()
+                    .find(|name| models.iter().any(|m| m.name == **name))
+                {
+                    ui.set_video_pipeline_index(0);
+                    set_model_picker(&ui, &models, name);
+                }
+                ui.set_restore_index(if dvd { 2 } else { 0 });
+                ui.set_detect_fields(dvd);
+                ui.set_match_color(false);
+                ui.set_stability_on(false);
+                ui.set_strength(1.0);
+                ui.set_detail_limit(1.0);
+            }
+            ui.invoke_settings_changed();
+        });
+    }
+
+    {
+        // Batch, filmstrip and loaded source together, so the app can stay
+        // open between sets of files.
+        let handle = ui.as_weak();
+        ui.on_clear_all(move || {
+            let Some(ui) = handle.upgrade() else { return };
+            ui.invoke_clear_queue();
+            let model = ui.get_clips();
+            if let Some(cards) = model.as_any().downcast_ref::<VecModel<ClipCard>>() {
+                cards.clear();
+            }
+            ui.invoke_clear_video();
+        });
+    }
+
+    {
+        let handle = ui.as_weak();
+        let queue = queue.clone();
+        ui.on_remove_task(move |index| {
+            let Some(ui) = handle.upgrade() else { return };
+            // The export thread reports progress by row position.
+            if ui.get_export_running() {
+                return;
+            }
+            let index = index.max(0) as usize;
+            if index >= queue.borrow().len() {
+                return;
+            }
+            let removed = queue.borrow_mut().remove(index);
+            if let Some(vm) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
+                if index < vm.row_count() {
+                    vm.remove(index);
+                }
+            }
+            log(
+                &ui.as_weak(),
+                format!("removed from batch: {}", removed.source_name()),
+            );
+        });
+    }
+
+    // Queue many files at once with the current settings. Each file is
+    // swapped in as the loaded source just long enough for the ordinary Add
+    // to Batch path to build its task, then the original returns. Every file
+    // that opens also gets a filmstrip card.
+    let queue_files: Rc<dyn Fn(Vec<std::path::PathBuf>)> = {
+        let handle = ui.as_weak();
+        let clip = clip.clone();
+        let still = still.clone();
+        Rc::new(move |mut paths: Vec<std::path::PathBuf>| {
+            let Some(ui) = handle.upgrade() else { return };
+            paths.sort_by(|a, b| natural_cmp(a, b));
+            let image_mode = ui.get_mode_index() == 1;
+            let rows = || {
+                ui.get_tasks()
+                    .as_any()
+                    .downcast_ref::<VecModel<TaskRow>>()
+                    .map(|vm| vm.row_count())
+                    .unwrap_or(0)
+            };
+            let before = rows();
+            let saved_clip = clip.borrow().clone();
+            let saved_still = still.borrow().clone();
+            let mut skipped = Vec::new();
+            for path in &paths {
+                if image_mode != image_mode::is_supported(path) {
+                    skipped.push(format!("{} (wrong type for this mode)", path.display()));
+                    continue;
+                }
+                let added_before = rows();
+                if image_mode {
+                    match image_mode::probe(path) {
+                        Ok(info) => {
+                            add_clip_card(&ui, path, None);
+                            *still.borrow_mut() = Some(info);
+                        }
+                        Err(error) => {
+                            skipped.push(format!("{}: {error}", path.display()));
+                            continue;
+                        }
+                    }
+                } else {
+                    match media::probe(path) {
+                        Ok(mut info) => {
+                            add_clip_card(&ui, path, Some(info.duration));
+                            info.reframe(ui.get_frame_index(), ui.get_crop_position());
+                            *clip.borrow_mut() = Some(info);
+                        }
+                        Err(error) => {
+                            skipped.push(format!("{}: {error}", path.display()));
+                            continue;
+                        }
+                    }
+                }
+                ui.invoke_add_task();
+                if rows() == added_before {
+                    skipped.push(format!(
+                        "{}: {}",
+                        path.display(),
+                        ui.get_preview_status()
+                    ));
+                }
+            }
+            *clip.borrow_mut() = saved_clip;
+            *still.borrow_mut() = saved_still;
+            let added = rows() - before;
+            for line in &skipped {
+                log(&ui.as_weak(), format!("batch import skipped {line}"));
+            }
+            let summary = if skipped.is_empty() {
+                format!("added {added} file(s) to the batch")
+            } else {
+                format!(
+                    "added {added} file(s) to the batch · {} skipped (see activity log)",
+                    skipped.len()
+                )
+            };
+            log(&ui.as_weak(), summary.clone());
+            ui.set_preview_status(summary.into());
+        })
+    };
+
+    {
+        let handle = ui.as_weak();
+        let queue_files = queue_files.clone();
+        ui.on_add_files(move || {
+            let Some(ui) = handle.upgrade() else { return };
+            let dialog = if ui.get_mode_index() == 1 {
+                rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"])
+            } else {
+                rfd::FileDialog::new()
+                    .add_filter("Video", &["mp4", "mkv", "mov", "avi", "webm", "m2ts", "ts"])
+            };
+            if let Some(paths) = dialog.add_filter("All files", &["*"]).pick_files() {
+                queue_files(paths);
+            }
+        });
+    }
+
+    {
+        let handle = ui.as_weak();
+        let open = open.clone();
+        ui.on_select_clip(move |index| {
+            let Some(ui) = handle.upgrade() else { return };
+            let path = ui
+                .get_clips()
+                .row_data(index.max(0) as usize)
+                .map(|card| std::path::PathBuf::from(card.path.as_str()));
+            if let Some(path) = path {
+                open(path);
+            }
+        });
+    }
+
+    {
+        let handle = ui.as_weak();
+        ui.on_remove_clip(move |index| {
+            let Some(ui) = handle.upgrade() else { return };
+            let model = ui.get_clips();
+            if let Some(cards) = model.as_any().downcast_ref::<VecModel<ClipCard>>() {
+                let index = index.max(0) as usize;
+                if index < cards.row_count() {
+                    cards.remove(index);
+                }
+            }
+        });
+    }
+
     {
         let handle = ui.as_weak();
         let clip = clip.clone();
@@ -1213,12 +1967,14 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = handle.unwrap();
             let rtx_video = ui.get_mode_index() == 0 && ui.get_video_pipeline_index() == 1;
             let rtx_image = ui.get_mode_index() == 1 && ui.get_image_pipeline_index() == 2;
+            let video2x_preset = (ui.get_mode_index() == 0 && ui.get_video_pipeline_index() == 2)
+                .then(|| video2x::preset(ui.get_video2x_preset_index()));
             let selected_model = active_models
                 .borrow()
                 .get(ui.get_model_index().max(0) as usize)
                 .cloned();
             let Some(model) = selected_model.or_else(|| {
-                (rtx_video || rtx_image).then(rtx_placeholder_model)
+                (rtx_video || rtx_image || video2x_preset.is_some()).then(rtx_placeholder_model)
             }) else {
                 return;
             };
@@ -1407,6 +2163,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_preview_status(error.into());
                 return;
             }
+            if video2x_preset.is_some() && !video2x::available() {
+                ui.set_preview_status(
+                    "Video2X runtime missing — restore the video2x folder beside Kraken".into(),
+                );
+                return;
+            }
             let interpolation_fps = ui
                 .get_interp_on()
                 .then(|| interpolate::target_fps(ui.get_interp_index()));
@@ -1439,9 +2201,11 @@ fn main() -> Result<(), slint::PlatformError> {
             let candidate = info.path.with_file_name(format!(
                 "{stem}_{}_{}{fps_suffix}.{extension}",
                 resolution::label(target_scale),
-                rtx_quality
-                    .map(|quality| format!("RTX-VSR-{}", quality.label()))
-                    .unwrap_or_else(|| model.name.clone())
+                match (rtx_quality, video2x_preset) {
+                    (Some(quality), _) => format!("RTX-VSR-{}", quality.label()),
+                    (None, Some(preset)) => preset.tag.to_string(),
+                    (None, None) => model.name.clone(),
+                }
             ));
             let out_path = unique_output_path(&candidate, &queue.borrow());
 
@@ -1456,8 +2220,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     restore: ui.get_restore_index(),
                     deinterlace: ui.get_detect_fields(),
                 },
-                match_color: ui.get_match_color() && !rtx_video,
-                stability: ui.get_stability_on() && !model.is_video() && !rtx_video,
+                match_color: ui.get_match_color() && !rtx_video && video2x_preset.is_none(),
+                stability: ui.get_stability_on()
+                    && !model.is_video()
+                    && !rtx_video
+                    && video2x_preset.is_none(),
                 lock_strength: ui.get_lock(),
                 cut_detect: ui.get_cut_detect(),
                 interpolation_fps,
@@ -1470,7 +2237,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 out_path: out_path.clone(),
                 codec: codec.into(),
                 cq,
-                copy_audio: ui.get_audio_index() == 0,
+                copy_audio: ui.get_audio_index() != 1,
+                audio_aac: ui.get_audio_index() == 2,
                 rtx_quality,
             };
 
@@ -1479,14 +2247,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 name: info.file_name().into(),
                 detail: format!(
                     "{ow}×{oh} · {} · {} fps · {} frames",
-                    rtx_quality
-                        .map(|quality| format!("RTX VSR {}", quality.label()))
-                        .unwrap_or_else(|| {
-                            format!(
-                                "{} · str {strength:.2} · lim {detail_limit:.2}",
-                                model.name
-                            )
-                        }),
+                    match (rtx_quality, video2x_preset) {
+                        (Some(quality), _) => format!("RTX VSR {}", quality.label()),
+                        (None, Some(preset)) => format!("Video2X {}", preset.label),
+                        (None, None) => format!(
+                            "{} · str {strength:.2} · lim {detail_limit:.2}",
+                            model.name
+                        ),
+                    },
                     spec.output_fps(),
                     spec.output_frames()
                 )
@@ -1499,7 +2267,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 done: false,
             };
 
-            queue.borrow_mut().push(TaskSpec::Video(spec));
+            queue.borrow_mut().push(match video2x_preset {
+                Some(preset) => TaskSpec::Video2x(spec, preset),
+                None => TaskSpec::Video(spec),
+            });
             if let Some(vm) = ui.get_tasks().as_any().downcast_ref::<VecModel<TaskRow>>() {
                 vm.push(row);
             }
@@ -1630,21 +2401,83 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.show()?;
 
+    // MCP is owned by the visible app and dispatches only on its UI thread.
+    // Imports share the same `open` closure used by Browse and drag-and-drop.
+    let _mcp_timer = {
+        let open = open.clone();
+        let handle = ui.as_weak();
+        let source_clip = clip.clone();
+        let source_still = still.clone();
+        let source_ui = ui.as_weak();
+        mcp::start(&ui, move |path| {
+            let ui = handle.upgrade().ok_or("App window is closed")?;
+            ui.set_preview_status("".into());
+            open(path);
+            let status = ui.get_preview_status().to_string();
+            if !ui.get_has_clip() || status.starts_with("could not read") {
+                Err(format!("App could not import media: {status}"))
+            } else {
+                Ok(())
+            }
+        }, move || {
+            let ui = source_ui.upgrade()?;
+            if ui.get_mode_index() == 1 {
+                source_still.borrow().as_ref().map(|info| info.path.clone())
+            } else {
+                source_clip.borrow().as_ref().map(|info| info.path.clone())
+            }
+        })
+    };
+
     // The native window does not exist until the event loop has spun at least
     // once, so `show()` is too early to ask for an HWND. Defer by one tick.
     let dnd_timer = slint::Timer::default();
+    // Winit delivers a multi-file drop as one event per file. Collect them
+    // briefly, then treat the group as one drop: a single file opens as
+    // before; several are sorted, queued with the current settings and
+    // added to the filmstrip, with the first loaded for preview.
+    let dropped: Rc<RefCell<Vec<std::path::PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+    let drop_timer = Rc::new(slint::Timer::default());
+    let on_drop = {
+        let open = open.clone();
+        let queue_files = queue_files.clone();
+        let dropped = dropped.clone();
+        let drop_timer = drop_timer.clone();
+        move |path: std::path::PathBuf| {
+            dropped.borrow_mut().push(path);
+            let open = open.clone();
+            let queue_files = queue_files.clone();
+            let dropped = dropped.clone();
+            drop_timer.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(250),
+                move || {
+                    let mut paths = std::mem::take(&mut *dropped.borrow_mut());
+                    paths.sort_by(|a, b| natural_cmp(a, b));
+                    match paths.len() {
+                        0 => {}
+                        1 => open(paths.remove(0)),
+                        _ => {
+                            // Opening first also switches Video/Image mode to
+                            // match, which the queueing pass relies on.
+                            open(paths[0].clone());
+                            queue_files(paths);
+                        }
+                    }
+                },
+            );
+        }
+    };
     {
         let handle = ui.as_weak();
-        let open = open.clone();
         dnd_timer.start(
             slint::TimerMode::SingleShot,
             std::time::Duration::from_millis(80),
             move || {
                 let Some(ui) = handle.upgrade() else { return };
-                let open = open.clone();
                 let w = ui.as_weak();
                 let hover_ui = ui.as_weak();
-                match dnd::attach(ui.window(), open, move |active| {
+                match dnd::attach(ui.window(), on_drop.clone(), move |active| {
                     if let Some(ui) = hover_ui.upgrade() {
                         ui.set_drop_active(active);
                     }
@@ -1709,13 +2542,8 @@ fn spawn_preview_worker(
             );
             let decode_started = std::time::Instant::now();
 
-            let (source, interpolation_note) = if job.rtx_quality.is_some() {
-                match media::frame_at_with(
-                    &job.clip,
-                    job.at_secs,
-                    None,
-                    job.source_treatment,
-                ) {
+            let (source, interpolation_note) = if job.rtx_quality.is_some() || job.video2x.is_some() {
+                match media::frame_at_with(&job.clip, job.at_secs, None, job.source_treatment) {
                     Ok(frame) => (frame, None),
                     Err(e) => {
                         log(&handle, format!("preview source processing failed: {e}"));
@@ -1780,6 +2608,70 @@ fn spawn_preview_worker(
             let preview_tile = job.tile.min(4096 / listed_scale).max(64);
             let (preview_output_width, preview_output_height) =
                 resolution::dimensions(source.width, source.height, job.target_scale, true);
+            if let Some(preset) = job.video2x {
+                let needed =
+                    resolution::working_scale(source.width, source.height, job.target_scale, true)
+                        .unwrap_or(2);
+                log_step(
+                    &handle,
+                    "VIDEO PREVIEW",
+                    2,
+                    format!(
+                        "Video2X {} · source {}×{} → exact {}×{} · {}{}",
+                        preset.label,
+                        source.width,
+                        source.height,
+                        preview_output_width,
+                        preview_output_height,
+                        preset.scale_note(needed),
+                        if job.interpolation_fps.is_some() {
+                            " · RIFE is applied in the export only"
+                        } else {
+                            ""
+                        }
+                    ),
+                );
+                let video2x_started = std::time::Instant::now();
+                match video2x::upscale_frame(
+                    &source,
+                    preview_output_width,
+                    preview_output_height,
+                    needed,
+                    preset,
+                ) {
+                    Ok(output) => {
+                        log_step(
+                            &handle,
+                            "VIDEO PREVIEW",
+                            3,
+                            format!(
+                                "Video2X preview {}×{} ready in {:.2}s",
+                                output.width,
+                                output.height,
+                                video2x_started.elapsed().as_secs_f32()
+                            ),
+                        );
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            "Video2X preview ready".into(),
+                            Some(output),
+                        );
+                    }
+                    Err(error) => {
+                        log(&handle, format!("Video2X preview failed: {error}"));
+                        report_current(
+                            &handle,
+                            &current_generation,
+                            job.generation,
+                            format!("Video2X preview failed: {error}"),
+                            None,
+                        );
+                    }
+                }
+                continue;
+            }
             if let Some(quality) = job.rtx_quality {
                 let vsr_plan = rtx_vsr::plan_output(
                     source.width,
@@ -1797,8 +2689,12 @@ fn spawn_preview_worker(
                         quality.label(),
                         source.width,
                         source.height,
-                        vsr_plan.map(|plan| plan.vsr_width).unwrap_or(preview_output_width),
-                        vsr_plan.map(|plan| plan.vsr_height).unwrap_or(preview_output_height),
+                        vsr_plan
+                            .map(|plan| plan.vsr_width)
+                            .unwrap_or(preview_output_width),
+                        vsr_plan
+                            .map(|plan| plan.vsr_height)
+                            .unwrap_or(preview_output_height),
                         preview_output_width,
                         preview_output_height
                     ),
@@ -1828,7 +2724,7 @@ fn spawn_preview_worker(
                                     preview_output_height,
                                     quality,
                                 ) {
-                                    match interpolate::Rife::load() {
+                                    match interpolate::Rife::load_preferred() {
                                         Ok(mut rife) => {
                                             if let Ok(mid) = rife.run(&output, &right, 0.5) {
                                                 output = mid;
@@ -2291,7 +3187,7 @@ fn decode_preview_source(
 
     if rife_model.is_none() {
         log(handle, "preview: loading RIFE timestep model on CUDA");
-        let rife = interpolate::Rife::load()?;
+        let rife = interpolate::Rife::load_preferred()?;
         log(
             handle,
             format!("loaded RIFE interpolation model on {}", rife.provider),
@@ -2783,11 +3679,13 @@ fn spawn_exporter(
                     // RTX VSR owns its native GPU context. Release idle ONNX
                     // first. Keep RIFE when this video task still interpolates.
                     loaded = None;
-                    let keep_rife = matches!(
-                        &spec,
-                        TaskSpec::Video(video)
-                            if video.rtx_quality.is_some() && video.interpolation_fps.is_some()
-                    );
+                    let keep_rife = match &spec {
+                        TaskSpec::Video(video) => {
+                            video.rtx_quality.is_some() && video.interpolation_fps.is_some()
+                        }
+                        TaskSpec::Video2x(video, _) => video.interpolation_fps.is_some(),
+                        _ => false,
+                    };
                     if !keep_rife {
                         rife_model = None;
                     }
@@ -2795,13 +3693,14 @@ fn spawn_exporter(
                         &handle,
                         spec.kind(),
                         1,
-                        "Release idle ONNX so RTX VSR receives available GPU memory",
+                        "Release idle ONNX so the external GPU pipeline receives available memory",
                     );
                 }
 
                 let needs_rife = matches!(
                     &spec,
-                    TaskSpec::Video(video) if video.interpolation_fps.is_some()
+                    TaskSpec::Video(video) | TaskSpec::Video2x(video, _)
+                        if video.interpolation_fps.is_some()
                 );
                 if needs_rife && rife_model.is_none() {
                     set_task(&handle, idx, 0.0, "loading RIFE", true, false);
@@ -2848,7 +3747,7 @@ fn spawn_exporter(
                     );
                 } else {
                     let detail = match &spec {
-                        TaskSpec::Video(_) => {
+                        TaskSpec::Video(_) | TaskSpec::Video2x(..) => {
                             "Frame interpolation disabled; preserve the prepared source frame rate"
                         }
                         TaskSpec::Image(_) | TaskSpec::Generative(_) | TaskSpec::RtxImage(_) => {
@@ -2881,7 +3780,7 @@ fn spawn_exporter(
                         video.cut_detect,
                         video.codec,
                         video.cq,
-                        if video.copy_audio { "copy" } else { "none" },
+                        audio_label(video),
                     ),
                     TaskSpec::Video(video) => format!(
                         "Prepare decode → model → finish → encode pipeline · {}×{} {} {} at {:.3} fps → {}×{} · {} output frames at {} fps · RIFE {} · color match {} · stability {} (strength {:.2}, cut {:.2}) · tile {}px/overlap {}px · {} CQ {} · audio {}",
@@ -2906,7 +3805,7 @@ fn spawn_exporter(
                         OVERLAP,
                         video.codec,
                         video.cq,
-                        if video.copy_audio { "copy" } else { "none" },
+                        audio_label(video),
                     ),
                     TaskSpec::Image(image) => format!(
                         "Prepare decode → tiled model → finish → {} pipeline · {}×{} {} {} → {}×{} · model {} · tile {}px/overlap {}px · color match {} · detail limit {:.2} · source blend {:.2} · alpha restore {}",
@@ -2939,6 +3838,40 @@ fn spawn_exporter(
                         image.refine_tile,
                         on_off(image.quality_finish),
                     ),
+                    TaskSpec::Video2x(video, preset) => format!(
+                        "Prepare {}Video2X {} → exact resize → encode · {}×{} {} {} at {:.3} fps → {}×{} · {} · RIFE {} · {} CQ {} · audio {} · runtime {}",
+                        if video.clip.needs_prepare(video.source_treatment) {
+                            "source treatment pass → "
+                        } else {
+                            ""
+                        },
+                        preset.label,
+                        video.clip.width,
+                        video.clip.height,
+                        video.clip.codec,
+                        video.clip.pix_fmt,
+                        video.clip.fps,
+                        video.output_size().0,
+                        video.output_size().1,
+                        resolution::working_scale(
+                            video.clip.width,
+                            video.clip.height,
+                            video.target_scale,
+                            true
+                        )
+                        .map(|needed| preset.scale_note(needed))
+                        .unwrap_or_default(),
+                        video
+                            .interpolation_fps
+                            .map(|fps| format!("on → {fps} fps (first pass)"))
+                            .unwrap_or_else(|| "off".into()),
+                        video.codec,
+                        video.cq,
+                        audio_label(video),
+                        video2x::runtime_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "missing".into()),
+                    ),
                     TaskSpec::RtxImage(image) => format!(
                         "Prepare decode → native NVIDIA VSR → RGB integrity check → {} pipeline · {}×{} {} {} → {}×{} · quality {} · runtime {}",
                         image.out_path.extension().and_then(|ext| ext.to_str()).unwrap_or("image").to_ascii_uppercase(),
@@ -2965,7 +3898,8 @@ fn spawn_exporter(
                 let started = std::time::Instant::now();
                 let progress_handle = handle.clone();
                 let progress_kind = spec.kind().to_string();
-                let progress_is_video = matches!(&spec, TaskSpec::Video(_));
+                let progress_is_video =
+                    matches!(&spec, TaskSpec::Video(_) | TaskSpec::Video2x(..));
                 let progress_is_rtx = matches!(&spec, TaskSpec::RtxImage(_));
                 let mut last_logged_bucket = 0u64;
                 let mut on_progress = move |done: u64, total: u64| {
@@ -3230,6 +4164,60 @@ fn spawn_exporter(
                     TaskSpec::RtxImage(image) => {
                         rtx_vsr::run(image, cancel.as_ref(), &mut on_progress).map(|_| None)
                     }
+                    TaskSpec::Video2x(video, preset) => {
+                        let temp = video.interpolation_fps.is_some().then(|| {
+                            video.out_path.with_file_name(format!(
+                                "{}.rife-pass.mkv",
+                                video
+                                    .out_path
+                                    .file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                            ))
+                        });
+                        let result = (|| -> Result<Option<crate::stages::Stages>, String> {
+                            let mut pass = video.clone();
+                            if let Some(temp) = temp.as_ref() {
+                                log(
+                                    &handle,
+                                    format!(
+                                        "VIDEO2X VIDEO · RIFE first pass at source size → {}",
+                                        temp.display()
+                                    ),
+                                );
+                                let rife = rife_model.as_mut().ok_or_else(|| {
+                                    "frame interpolation was enabled but RIFE was not loaded"
+                                        .to_string()
+                                })?;
+                                export::interpolate_source(
+                                    video,
+                                    rife,
+                                    temp,
+                                    cancel.clone(),
+                                    &mut on_progress,
+                                )?;
+                                rife_model = None;
+                                pass.clip = crate::media::probe(temp).map_err(|error| {
+                                    format!("could not read interpolated pass: {error}")
+                                })?;
+                                pass.interpolation_fps = None;
+                                pass.source_treatment = crate::media::SourceTreatment::default();
+                            }
+                            let log_handle = handle.clone();
+                            video2x::run(
+                                &pass,
+                                *preset,
+                                cancel.clone(),
+                                &mut on_progress,
+                                &mut |line| log(&log_handle, line),
+                            )
+                            .map(|_| None)
+                        })();
+                        if let Some(temp) = temp {
+                            let _ = std::fs::remove_file(temp);
+                        }
+                        result
+                    }
                 };
 
                 match result {
@@ -3324,12 +4312,7 @@ struct PlaybackControl {
 }
 
 impl PlaybackControl {
-    fn start(
-        &self,
-        clip: media::ClipInfo,
-        start_secs: f64,
-        treatment: media::SourceTreatment,
-    ) {
+    fn start(&self, clip: media::ClipInfo, start_secs: f64, treatment: media::SourceTreatment) {
         let session = self.session.fetch_add(1, Ordering::Relaxed) + 1;
         kill_playback_child(&self.child);
         let _ = self.tx.send(PlaybackCommand::Start {
@@ -3783,6 +4766,7 @@ fn collect_settings(
         video_pipeline_index: ui.get_video_pipeline_index(),
         image_pipeline_index: ui.get_image_pipeline_index(),
         rtx_vsr_quality_index: ui.get_rtx_vsr_quality_index(),
+        video2x_preset: video2x::preset(ui.get_video2x_preset_index()).label.to_string(),
         generative_model: generative_models
             .get(ui.get_generative_model_index().max(0) as usize)
             .map(|model| model.name.clone())
@@ -3802,6 +4786,9 @@ fn collect_settings(
         auto_tile: ui.get_auto_tile(),
         content_index: ui.get_content_index(),
         restore_index: ui.get_restore_index(),
+        frame_index: ui.get_frame_index(),
+        batch_height: ui.get_batch_height(),
+        crop_position: ui.get_crop_position(),
         detect_fields: ui.get_detect_fields(),
         preserve_grain: ui.get_preserve_grain(),
         match_color: ui.get_match_color(),
@@ -3857,7 +4844,9 @@ fn reveal(path: &str) {
         eprintln!("reveal: {path} does not exist");
         return;
     }
-    let _ = std::process::Command::new("explorer.exe").arg(&folder).spawn();
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(&folder)
+        .spawn();
 }
 
 fn report_current(
@@ -4015,6 +5004,42 @@ mod ui_tests {
             .iter()
             .all(|model| !model.is_video() && !model.video_tuned));
         assert_eq!(video.len() + image.len(), all.len());
+    }
+
+    #[test]
+    fn enhance_model_selection_accepts_names_and_falls_back_safely() {
+        let models = vec![
+            upscale::ModelEntry {
+                name: "OpenProteus Compact".into(),
+                file: "2x-OpenProteus.onnx".into(),
+                fp16_file: None,
+                scale: 2,
+                architecture: "Compact".into(),
+                temporal_frames: 1,
+                video_tuned: true,
+            },
+            upscale::ModelEntry {
+                name: "Real-ESRGAN General x4v3".into(),
+                file: "realesr-general-x4v3.onnx".into(),
+                fp16_file: None,
+                scale: 4,
+                architecture: "SRVGGNetCompact".into(),
+                temporal_frames: 1,
+                video_tuned: true,
+            },
+        ];
+        assert_eq!(
+            select_enhance_model(&models, "openproteus")
+                .expect("model")
+                .name,
+            "OpenProteus Compact"
+        );
+        assert_eq!(
+            select_enhance_model(&models, "missing-model")
+                .expect("default model")
+                .name,
+            "OpenProteus Compact"
+        );
     }
 
     #[test]
